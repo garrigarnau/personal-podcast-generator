@@ -1,0 +1,117 @@
+version: '3.8'
+
+# Production overrides for docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+services:
+  # Database - Production optimizations
+  db:
+    restart: always
+    # Don't expose database port externally in production
+    ports: []
+    # Production PostgreSQL optimizations
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=8MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c max_connections=100
+      -c log_statement=none
+      -c log_duration=off
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Backend - Production configuration
+  backend:
+    restart: always
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "False"
+      SQL_ECHO: "False"
+      UVICORN_WORKERS: 4
+      LOG_LEVEL: info
+    # Remove volume mounts - use image code only
+    volumes:
+      - audio_files:/app/audio_files
+      - backend_logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    # Production logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=backend"
+
+  # Frontend - Production configuration
+  frontend:
+    restart: always
+    # Remove volume mounts - use built image only
+    volumes: []
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    # Production logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=frontend"
+
+# Production volume configurations
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/podcast-generator/postgres
+  audio_files:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/podcast-generator/audio
+  backend_logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/log/podcast-generator
