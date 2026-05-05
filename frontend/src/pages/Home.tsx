@@ -5,6 +5,8 @@ import { authService } from '../services/auth';
 import PreferencesModal from '../components/PreferencesModal';
 import GeneratePodcastSection from '../components/GeneratePodcastSection';
 import ScheduleSettings from '../components/ScheduleSettings';
+import ScriptViewer from '../components/ScriptViewer';
+import AudioPlayer from '../components/AudioPlayer';
 import { PodcastPreferences, Podcast } from '../types/podcast';
 import {
   getPodcasts,
@@ -12,7 +14,9 @@ import {
   generatePodcast,
   pollPodcastStatus,
   updateUserPreferences,
-  updateScheduleSettings
+  updateScheduleSettings,
+  getCurrentUser,
+  getAudioBlobUrl
 } from '../services/api';
 
 // Group podcasts by day
@@ -44,7 +48,7 @@ export const Home: React.FC = () => {
   const [interests, setInterests] = useState<string[]>([]);
   const [preferences, setPreferences] = useState<PodcastPreferences>({
     length: 'medium',
-    tone: 'balanced',
+    tone: 'professional',
   });
 
   // Modal state
@@ -57,6 +61,8 @@ export const Home: React.FC = () => {
 
   // Audio player state
   const [playingPodcastId, setPlayingPodcastId] = useState<string | null>(null);
+  const [audioBlobUrls, setAudioBlobUrls] = useState<Map<string, string>>(new Map());
+  const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
@@ -70,10 +76,41 @@ export const Home: React.FC = () => {
     days_of_week: [1, 2, 3, 4, 5],
   });
 
-  // Load podcasts on mount
+  // Load user preferences and podcasts on mount
   useEffect(() => {
+    loadUserPreferences();
     loadPodcasts();
   }, []);
+
+  const loadUserPreferences = async () => {
+    try {
+      const userData = await getCurrentUser();
+
+      // Load preferences
+      if (userData.preferences) {
+        const prefs = userData.preferences;
+
+        // Set interests
+        if (prefs.interests && Array.isArray(prefs.interests)) {
+          setInterests(prefs.interests);
+        }
+
+        // Set podcast preferences (length and tone)
+        if (prefs.duration_minutes) {
+          const length = prefs.duration_minutes <= 5 ? 'short' :
+                        prefs.duration_minutes <= 15 ? 'medium' : 'long';
+          setPreferences(prev => ({ ...prev, length }));
+        }
+      }
+
+      // Load schedule settings
+      if (userData.schedule_settings) {
+        setScheduleSettings(userData.schedule_settings);
+      }
+    } catch (err) {
+      console.error('Failed to load user preferences:', err);
+    }
+  };
 
   const loadPodcasts = async () => {
     try {
@@ -90,6 +127,7 @@ export const Home: React.FC = () => {
             interests: metadata.interests || [],
             preferences: metadata.preferences,
             duration: metadata.duration,
+            parsedMetadata: metadata, // Include full parsed metadata
           };
         } catch (e) {
           return podcast;
@@ -113,13 +151,21 @@ export const Home: React.FC = () => {
   // Handle save preferences
   const handleSavePreferences = async () => {
     try {
+      const durationMinutes = preferences.length === 'short' ? 5 :
+                              preferences.length === 'medium' ? 10 : 20;
+
       await updateUserPreferences({
         interests,
-        duration_minutes: preferences.length === 'short' ? 5 : preferences.length === 'medium' ? 10 : 20,
+        duration_minutes: durationMinutes,
       });
+
       console.log('Preferences saved successfully');
+
+      // Optionally reload to ensure consistency
+      await loadUserPreferences();
     } catch (err) {
       console.error('Failed to save preferences:', err);
+      setError('Failed to save preferences');
     }
   };
 
@@ -134,22 +180,63 @@ export const Home: React.FC = () => {
       setIsGenerating(true);
       setError(null);
 
+      // Convert frontend preferences to backend format
+      const durationMinutes = preferences.length === 'short' ? 5 :
+                              preferences.length === 'medium' ? 10 : 20;
+
+      // Use mock_audio=false to enable real ElevenLabs streaming TTS
       const response = await generatePodcast({
         interests,
-        preferences,
-      });
+        tone: preferences.tone,
+        length: durationMinutes,
+      }, false); // Set to false for production with real audio generation
 
-      // Poll for status
+      // Poll for status and update podcasts list in real-time
       await pollPodcastStatus(
-        response.podcastId,
-        () => {
-          // Status update callback
+        response.id,
+        (statusUpdate) => {
+          // Update the podcasts list with the latest status
+          setPodcasts(prev => {
+            const existingIndex = prev.findIndex(p => p.id === statusUpdate.id);
+
+            // Parse metadata if available
+            let parsedMetadata;
+            try {
+              parsedMetadata = statusUpdate.metadata ? JSON.parse(statusUpdate.metadata) : undefined;
+            } catch (e) {
+              console.error('Failed to parse metadata:', e);
+            }
+
+            const updatedPodcast: Podcast = {
+              id: statusUpdate.id,
+              user_id: '',
+              status: statusUpdate.status,
+              audio_url: statusUpdate.audio_url,
+              script: statusUpdate.script,
+              error_message: statusUpdate.error_message,
+              metadata: statusUpdate.metadata,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              interests: interests,
+              parsedMetadata: parsedMetadata,
+            };
+
+            if (existingIndex >= 0) {
+              // Update existing
+              const newPodcasts = [...prev];
+              newPodcasts[existingIndex] = { ...newPodcasts[existingIndex], ...updatedPodcast };
+              return newPodcasts;
+            } else {
+              // Add new
+              return [updatedPodcast, ...prev];
+            }
+          });
         },
         2000,
         300000
       );
 
-      // Reload podcasts list
+      // Reload podcasts list for complete data
       await loadPodcasts();
     } catch (err) {
       console.error('Failed to generate podcast:', err);
@@ -164,6 +251,9 @@ export const Home: React.FC = () => {
     try {
       const response = await updateScheduleSettings(settings);
       setScheduleSettings(response.schedule_settings);
+
+      // Reload to ensure consistency
+      await loadUserPreferences();
     } catch (err) {
       console.error('Failed to save schedule settings:', err);
       throw err;
@@ -171,13 +261,43 @@ export const Home: React.FC = () => {
   };
 
   // Handle play/pause
-  const togglePlay = (podcastId: string) => {
+  const togglePlay = async (podcastId: string) => {
     if (playingPodcastId === podcastId) {
       setPlayingPodcastId(null);
+      return;
+    }
+
+    // Check if we already have a blob URL for this podcast
+    if (!audioBlobUrls.has(podcastId)) {
+      try {
+        setLoadingAudioId(podcastId);
+        // Fetch the audio with authentication and create blob URL
+        const blobUrl = await getAudioBlobUrl(podcastId);
+        // Create new Map without mutating the old one
+        const newMap = new Map(audioBlobUrls);
+        newMap.set(podcastId, blobUrl);
+        setAudioBlobUrls(newMap);
+        setPlayingPodcastId(podcastId);
+      } catch (err) {
+        console.error('Failed to load audio:', err);
+        setError('Failed to load audio. Please try again.');
+      } finally {
+        setLoadingAudioId(null);
+      }
     } else {
+      // Already have the audio, just play it
       setPlayingPodcastId(podcastId);
     }
   };
+
+  // Cleanup blob URLs on unmount
+  useEffect(() => {
+    return () => {
+      audioBlobUrls.forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
+    };
+  }, [audioBlobUrls]);
 
   // Handle download
   const handleDownload = async (podcastId: string) => {
@@ -289,13 +409,16 @@ export const Home: React.FC = () => {
                           {podcast.status === 'completed' && podcast.audio_url ? (
                             <button
                               onClick={() => togglePlay(podcast.id)}
+                              disabled={loadingAudioId === podcast.id}
                               className="
                                 w-12 h-12 flex items-center justify-center
                                 bg-blue-600 hover:bg-blue-700 text-white rounded-full
-                                transition-colors
+                                transition-colors disabled:opacity-50 disabled:cursor-not-allowed
                               "
                             >
-                              {playingPodcastId === podcast.id ? (
+                              {loadingAudioId === podcast.id ? (
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                              ) : playingPodcastId === podcast.id ? (
                                 <Pause size={20} />
                               ) : (
                                 <Play size={20} className="ml-1" />
@@ -362,15 +485,35 @@ export const Home: React.FC = () => {
                       </div>
 
                       {/* Audio Player (for currently playing) */}
-                      {playingPodcastId === podcast.id && podcast.audio_url && (
+                      {playingPodcastId === podcast.id && podcast.audio_url && audioBlobUrls.has(podcast.id) && (
                         <div className="mt-4 pt-4 border-t border-gray-200">
-                          <audio
-                            src={podcast.audio_url}
-                            controls
-                            autoPlay
-                            className="w-full"
-                            onEnded={() => setPlayingPodcastId(null)}
+                          <AudioPlayer
+                            audioUrl={audioBlobUrls.get(podcast.id)!}
+                            title={`Podcast - ${new Date(podcast.created_at).toLocaleDateString()}`}
+                            onDownload={() => handleDownload(podcast.id)}
                           />
+                        </div>
+                      )}
+
+                      {/* Script Viewer */}
+                      {podcast.status === 'completed' && podcast.script && (
+                        <div className="mt-4">
+                          <ScriptViewer
+                            script={podcast.script}
+                            articles={podcast.parsedMetadata?.articles}
+                          />
+                        </div>
+                      )}
+
+                      {/* Script Generation Indicator */}
+                      {(podcast.status === 'processing' || podcast.status === 'pending') && (
+                        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                          <div className="flex items-center gap-3">
+                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                            <span className="text-sm text-blue-800">
+                              {podcast.status === 'pending' ? 'Queued for generation...' : 'Generating script and audio...'}
+                            </span>
+                          </div>
                         </div>
                       )}
                     </div>

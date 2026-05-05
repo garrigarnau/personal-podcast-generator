@@ -14,8 +14,10 @@ from uuid import UUID
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
+from pathlib import Path
 
 from app.core.database import get_session
 from app.core.auth import get_current_active_user
@@ -23,6 +25,7 @@ from app.models.podcast import Podcast, PodcastStatus
 from app.models.user import User
 from app.schemas.podcast import (
     GeneratePodcastRequest,
+    ScriptToAudioRequest,
     PodcastResponse,
     PodcastListResponse,
     PodcastStatusResponse,
@@ -84,6 +87,7 @@ async def generate_podcast_background(
             interests=request_data.interests,
             preferences=preferences,
             db=session,
+            mock_audio=request_data.mock_audio,
         )
 
         logger.info(
@@ -123,13 +127,8 @@ async def generate_podcast_background(
                 }
             }
         },
-        404: {
-            "description": "User not found",
-            "content": {
-                "application/json": {
-                    "example": {"detail": "User not found"}
-                }
-            }
+        401: {
+            "description": "Not authenticated",
         },
         422: {
             "description": "Invalid request parameters",
@@ -137,9 +136,9 @@ async def generate_podcast_background(
     }
 )
 async def generate_podcast(
-    user_id: UUID,
     request: GeneratePodcastRequest,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_session),
 ) -> PodcastStatusResponse:
     """
@@ -150,40 +149,26 @@ async def generate_podcast(
     check when the podcast is ready.
 
     Args:
-        user_id: UUID of the user requesting the podcast
         request: Podcast generation parameters
         background_tasks: FastAPI background tasks manager
+        current_user: Authenticated user
         session: Database session
 
     Returns:
         PodcastStatusResponse with podcast ID and initial status
-
-    Raises:
-        HTTPException: 404 if user not found
     """
     logger.info(
-        f"Received podcast generation request for user_id={user_id}, "
+        f"Received podcast generation request for user_id={current_user.id}, "
         f"interests={request.interests}, tone={request.tone}, length={request.length}"
     )
 
-    # Verify user exists
-    result = await session.execute(
-        select(User).where(User.id == user_id)
-    )
-    user = result.scalar_one_or_none()
-
-    if not user:
-        logger.warning(f"User not found: user_id={user_id}")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+    user = current_user
 
     # Create podcast record with pending status
     podcast = Podcast(
-        user_id=user_id,
+        user_id=current_user.id,
         status=PodcastStatus.PENDING,
-        metadata=str({
+        podcast_metadata=str({
             "interests": request.interests,
             "tone": request.tone,
             "length": request.length,
@@ -196,7 +181,7 @@ async def generate_podcast(
     await session.refresh(podcast)
 
     logger.info(
-        f"Created podcast record: podcast_id={podcast.id}, user_id={user_id}, "
+        f"Created podcast record: podcast_id={podcast.id}, user_id={current_user.id}, "
         f"status={podcast.status.value}"
     )
 
@@ -206,7 +191,7 @@ async def generate_podcast(
     background_tasks.add_task(
         generate_podcast_background,
         podcast.id,
-        user_id,
+        current_user.id,
         request,
         session
     )
@@ -218,6 +203,196 @@ async def generate_podcast(
         error_message=None,
         progress=0
     )
+
+
+@router.post(
+    "/generate-from-script",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PodcastStatusResponse,
+    summary="Generate audio from a pre-written script",
+    description=(
+        "Bypasses news fetching and script generation by directly converting "
+        "a provided script to audio. Useful for saving API credits when you "
+        "already have a script written. Returns immediately with a podcast ID "
+        "that can be polled for status."
+    ),
+    responses={
+        202: {
+            "description": "Audio generation started successfully",
+        },
+        401: {
+            "description": "Not authenticated",
+        },
+        422: {
+            "description": "Invalid script format",
+        }
+    }
+)
+async def generate_audio_from_script(
+    request: ScriptToAudioRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_session),
+) -> PodcastStatusResponse:
+    """
+    Generate audio from a pre-written script.
+
+    This endpoint allows you to skip news fetching and script generation,
+    going directly to audio generation with a manually provided script.
+
+    Args:
+        request: Script text with speaker tags and metadata
+        background_tasks: FastAPI background tasks manager
+        current_user: Authenticated user
+        session: Database session
+
+    Returns:
+        PodcastStatusResponse with podcast ID and initial status
+    """
+    logger.info(
+        f"Received script-to-audio request for user_id={current_user.id}"
+    )
+
+    # Create podcast record with pending status
+    podcast = Podcast(
+        user_id=current_user.id,
+        status=PodcastStatus.PENDING,
+        podcast_metadata=str({
+            "source": "manual_script",
+            "tone": request.tone,
+            "length": request.length,
+        })
+    )
+
+    session.add(podcast)
+    await session.commit()
+    await session.refresh(podcast)
+
+    logger.info(
+        f"Created podcast record for script-to-audio: podcast_id={podcast.id}"
+    )
+
+    # Trigger background audio generation
+    background_tasks.add_task(
+        generate_audio_from_script_background,
+        podcast.id,
+        current_user.id,
+        request,
+        session
+    )
+
+    return PodcastStatusResponse(
+        id=podcast.id,
+        status=podcast.status.value,
+        audio_url=None,
+        error_message=None,
+        progress=0
+    )
+
+
+async def generate_audio_from_script_background(
+    podcast_id: UUID,
+    user_id: UUID,
+    request_data: ScriptToAudioRequest,
+    session: AsyncSession,
+) -> None:
+    """
+    Background task to generate audio from a pre-written script.
+
+    This function:
+    1. Parses the script text into segments
+    2. Generates audio using ElevenLabs
+    3. Saves audio file and updates podcast record
+
+    Args:
+        podcast_id: ID of the podcast to generate
+        user_id: ID of the user requesting the podcast
+        request_data: Script text and preferences
+        session: Database session for the background task
+    """
+    from app.services.script_service import parse_script_text
+    from app.services.audio_service import ElevenLabsAudioService
+    from app.models.metrics import Metrics
+
+    logger.info(
+        f"Starting script-to-audio generation for podcast_id={podcast_id}"
+    )
+
+    try:
+        # Update status to processing
+        result = await session.execute(
+            select(Podcast).where(Podcast.id == podcast_id)
+        )
+        podcast = result.scalar_one()
+        podcast.status = PodcastStatus.PROCESSING
+        await session.commit()
+
+        # Parse the script text
+        logger.info(f"Parsing script text for podcast_id={podcast_id}")
+        script = parse_script_text(
+            script_text=request_data.script_text,
+            tone=request_data.tone,
+            length=request_data.length
+        )
+
+        # Save parsed script to podcast
+        podcast.script = script.get_full_text()
+        await session.commit()
+
+        logger.info(
+            f"Script parsed: {len(script.segments)} segments, "
+            f"{script.total_word_count} words"
+        )
+
+        # Generate audio
+        logger.info(f"Starting audio generation for podcast_id={podcast_id}")
+        audio_service = ElevenLabsAudioService(mock_mode=request_data.mock_audio)
+
+        async with audio_service:
+            audio_response = await audio_service.generate_audio(
+                script=script,
+                podcast_id=str(podcast_id)
+            )
+
+        if not audio_response.success:
+            raise Exception(f"Audio generation failed: {audio_response.error_message}")
+
+        # Update podcast with audio URL
+        podcast.audio_url = audio_response.audio_file.file_path
+        podcast.status = PodcastStatus.COMPLETED
+        await session.commit()
+
+        # Save metrics
+        metrics = Metrics(
+            user_id=user_id,
+            podcast_id=podcast_id,
+            tokens_used=0,  # No GPT tokens used
+            elevenlabs_characters=audio_response.audio_file.metrics.total_characters,
+            processing_time_seconds=audio_response.audio_file.metrics.total_latency_ms / 1000,
+        )
+        session.add(metrics)
+        await session.commit()
+
+        logger.info(
+            f"Script-to-audio generation completed: podcast_id={podcast_id}, "
+            f"audio_url={podcast.audio_url}"
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Script-to-audio generation failed for podcast_id={podcast_id}: {e}",
+            exc_info=True
+        )
+
+        # Update podcast with error
+        result = await session.execute(
+            select(Podcast).where(Podcast.id == podcast_id)
+        )
+        podcast = result.scalar_one_or_none()
+        if podcast:
+            podcast.status = PodcastStatus.FAILED
+            podcast.error_message = str(e)
+            await session.commit()
 
 
 @router.get(
@@ -287,7 +462,7 @@ async def get_podcast(
         audio_url=podcast.audio_url,
         script=podcast.script,
         error_message=podcast.error_message,
-        metadata=podcast.metadata,
+        metadata=podcast.podcast_metadata,
         created_at=podcast.created_at,
         updated_at=podcast.updated_at,
     )
@@ -359,8 +534,10 @@ async def get_podcast_status(
         id=podcast.id,
         status=podcast.status.value,
         audio_url=podcast.audio_url,
+        script=podcast.script,
         error_message=podcast.error_message,
-        progress=progress
+        progress=progress,
+        metadata=podcast.podcast_metadata
     )
 
 
@@ -469,7 +646,7 @@ async def list_podcasts(
                 audio_url=p.audio_url,
                 script=p.script,
                 error_message=p.error_message,
-                metadata=p.metadata,
+                metadata=p.podcast_metadata,
                 created_at=p.created_at,
                 updated_at=p.updated_at,
             )
@@ -479,4 +656,114 @@ async def list_podcasts(
         page=page,
         page_size=page_size,
         total_pages=total_pages,
+    )
+
+
+@router.get(
+    "/{podcast_id}/audio",
+    summary="Stream or download podcast audio",
+    description=(
+        "Serves the generated podcast audio file. Can be used for streaming "
+        "in the browser or downloading. The file is served with appropriate "
+        "Content-Type and Content-Disposition headers."
+    ),
+    responses={
+        200: {
+            "description": "Audio file returned successfully",
+            "content": {"audio/mpeg": {}},
+        },
+        404: {
+            "description": "Podcast or audio file not found",
+        },
+        403: {
+            "description": "Not authorized to access this podcast",
+        }
+    }
+)
+async def get_podcast_audio(
+    podcast_id: UUID,
+    download: bool = False,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_session),
+) -> FileResponse:
+    """
+    Serve the podcast audio file.
+
+    This endpoint streams the generated MP3 file to the client. It can be used
+    for in-browser playback or file download.
+
+    Args:
+        podcast_id: UUID of the podcast
+        download: If True, force download instead of streaming (default: False)
+        current_user: Current authenticated user
+        session: Database session
+
+    Returns:
+        FileResponse with the audio file
+
+    Raises:
+        HTTPException: 404 if podcast or file not found, 403 if unauthorized
+    """
+    logger.debug(f"Audio request for podcast_id={podcast_id}, download={download}")
+
+    # Get podcast record
+    result = await session.execute(
+        select(Podcast).where(Podcast.id == podcast_id)
+    )
+    podcast = result.scalar_one_or_none()
+
+    if not podcast:
+        logger.warning(f"Podcast not found: podcast_id={podcast_id}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Podcast not found"
+        )
+
+    # Check ownership (users can only access their own podcasts)
+    if podcast.user_id != current_user.id:
+        logger.warning(
+            f"Unauthorized audio access attempt: user_id={current_user.id}, "
+            f"podcast_user_id={podcast.user_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this podcast"
+        )
+
+    # Check if audio file exists
+    if not podcast.audio_url:
+        logger.warning(f"Audio not generated yet: podcast_id={podcast_id}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Audio file not generated yet"
+        )
+
+    # Get file path
+    audio_path = Path(podcast.audio_url)
+
+    if not audio_path.exists():
+        logger.error(f"Audio file not found on disk: {audio_path}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Audio file not found on server"
+        )
+
+    # Determine content disposition
+    disposition_type = "attachment" if download else "inline"
+    filename = f"podcast-{podcast_id}.mp3"
+
+    logger.info(
+        f"Serving audio: podcast_id={podcast_id}, file={audio_path}, "
+        f"size={audio_path.stat().st_size} bytes"
+    )
+
+    # Return file response
+    return FileResponse(
+        path=str(audio_path),
+        media_type="audio/mpeg",
+        filename=filename,
+        headers={
+            "Content-Disposition": f'{disposition_type}; filename="{filename}"',
+            "Accept-Ranges": "bytes",  # Enable seeking in audio player
+        }
     )

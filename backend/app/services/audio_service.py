@@ -2,7 +2,7 @@
 ElevenLabs Audio Generation Service.
 
 Production-grade service for generating high-quality podcast audio using
-ElevenLabs Text-to-Speech API with the multilingual_v2 model.
+ElevenLabs Text-to-Speech API.
 
 Features:
 - Multi-speaker support (Alex and Sonia with distinct voices)
@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import UUID
 
-import httpx
 from pydub import AudioSegment
+from elevenlabs import VoiceSettings
+from elevenlabs.client import ElevenLabs
 
 from app.core.config import settings
 from app.services.script_service import PodcastScript, ScriptSegment, SpeakerType
@@ -33,7 +34,7 @@ from app.schemas.audio import (
     AudioGenerationResponse,
     AudioMetrics,
     AudioSegmentMetrics,
-    VoiceSettings,
+    VoiceSettings as AudioVoiceSettings,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class ElevenLabsAudioService:
 
     # ElevenLabs API configuration
     BASE_URL = "https://api.elevenlabs.io/v1"
-    MODEL = "eleven_multilingual_v2"
+    MODEL = "eleven_flash_v2_5"  # Faster model for lower latency
 
     # Voice IDs for podcast speakers (using ElevenLabs pre-made voices)
     # Replace with your desired voice IDs from https://elevenlabs.io/voice-library
@@ -86,6 +87,7 @@ class ElevenLabsAudioService:
     CHANNELS = 1  # Mono
     BITRATE = 128  # kbps
     FORMAT = "mp3"
+    OUTPUT_FORMAT = "mp3_44100_128"  # ElevenLabs format specification
 
     # Retry configuration
     MAX_RETRIES = 3
@@ -103,6 +105,7 @@ class ElevenLabsAudioService:
         self,
         api_key: Optional[str] = None,
         storage_path: Optional[str] = None,
+        mock_mode: bool = False,
     ):
         """
         Initialize ElevenLabsAudioService.
@@ -110,48 +113,40 @@ class ElevenLabsAudioService:
         Args:
             api_key: ElevenLabs API key (defaults to settings.ELEVENLABS_API_KEY)
             storage_path: Path to store generated audio files
+            mock_mode: If True, skip actual API calls and return mock data
         """
         self.api_key = api_key or settings.ELEVENLABS_API_KEY
         self.storage_path = Path(
             storage_path or "/tmp/podcasts"
         )  # Default to /tmp in production use S3/Cloudinary
         self.storage_path.mkdir(parents=True, exist_ok=True)
+        self.mock_mode = mock_mode
 
-        # HTTP client for API requests
-        self.client: Optional[httpx.AsyncClient] = None
+        # Initialize ElevenLabs client
+        self.client: Optional[ElevenLabs] = None
+        if not mock_mode:
+            self.client = ElevenLabs(api_key=self.api_key)
 
         # Semaphore for rate limiting
         self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
 
         logger.info(
-            f"ElevenLabsAudioService initialized with storage path: {self.storage_path}"
+            f"ElevenLabsAudioService initialized with storage path: {self.storage_path}, mock_mode: {mock_mode}"
         )
 
     async def __aenter__(self):
         """Async context manager entry."""
-        await self._ensure_client()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self.close()
 
-    async def _ensure_client(self) -> None:
-        """Ensure HTTP client is initialized."""
-        if self.client is None:
-            self.client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self.REQUEST_TIMEOUT),
-                limits=httpx.Limits(
-                    max_keepalive_connections=10, max_connections=20
-                ),
-            )
-
     async def close(self) -> None:
-        """Close HTTP client and cleanup resources."""
-        if self.client:
-            await self.client.aclose()
-            self.client = None
-            logger.info("ElevenLabsAudioService HTTP client closed")
+        """Close client and cleanup resources."""
+        # ElevenLabs SDK client doesn't need explicit closing
+        self.client = None
+        logger.info("ElevenLabsAudioService client closed")
 
     def _get_voice_id(self, speaker: SpeakerType) -> str:
         """
@@ -187,7 +182,7 @@ class ElevenLabsAudioService:
         self,
         text: str,
         voice_id: str,
-        voice_settings: Optional[VoiceSettings] = None,
+        voice_settings: Optional[AudioVoiceSettings] = None,
         retry_count: int = 0,
     ) -> Tuple[bytes, int]:
         """
@@ -205,37 +200,17 @@ class ElevenLabsAudioService:
         Raises:
             ElevenLabsAPIError: If API request fails after retries
         """
-        await self._ensure_client()
+        if not self.client:
+            raise ElevenLabsAPIError("ElevenLabs client not initialized")
 
         # Prepare voice settings
-        settings_dict = (
-            {
-                "stability": voice_settings.stability,
-                "similarity_boost": voice_settings.similarity_boost,
-                "style": voice_settings.style,
-                "use_speaker_boost": voice_settings.use_speaker_boost,
-            }
-            if voice_settings
-            else {
-                "stability": 0.5,
-                "similarity_boost": 0.75,
-                "style": 0.0,
-                "use_speaker_boost": True,
-            }
+        elevenlabs_settings = VoiceSettings(
+            stability=voice_settings.stability if voice_settings else 0.5,
+            similarity_boost=voice_settings.similarity_boost if voice_settings else 0.75,
+            style=voice_settings.style if voice_settings else 0.0,
+            use_speaker_boost=voice_settings.use_speaker_boost if voice_settings else True,
+            speed=1.0,  # Normal speed
         )
-
-        # Prepare request
-        url = f"{self.BASE_URL}/text-to-speech/{voice_id}"
-        headers = {
-            "Accept": "audio/mpeg",
-            "xi-api-key": self.api_key,
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "text": text,
-            "model_id": self.MODEL,
-            "voice_settings": settings_dict,
-        }
 
         start_time = time.perf_counter()
 
@@ -246,20 +221,22 @@ class ElevenLabsAudioService:
                     f"text_length={len(text)}, retry={retry_count}"
                 )
 
-                response = await self.client.post(
-                    url, json=payload, headers=headers
+                # Use the convert API
+                audio_iterator = self.client.text_to_speech.convert(
+                    voice_id=voice_id,
+                    text=text,
+                    model_id=self.MODEL,
+                    output_format=self.OUTPUT_FORMAT,
+                    voice_settings=elevenlabs_settings,
                 )
 
-                # Check for errors
-                if response.status_code != 200:
-                    error_body = response.text
-                    raise ElevenLabsAPIError(
-                        message=f"ElevenLabs API error: {response.status_code}",
-                        status_code=response.status_code,
-                        response_body=error_body,
-                    )
+                # Collect audio chunks into bytes
+                audio_bytes_io = BytesIO()
+                for chunk in audio_iterator:
+                    if chunk:
+                        audio_bytes_io.write(chunk)
 
-                audio_bytes = response.content
+                audio_bytes = audio_bytes_io.getvalue()
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
 
                 logger.debug(
@@ -269,7 +246,7 @@ class ElevenLabsAudioService:
 
                 return audio_bytes, latency_ms
 
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except Exception as e:
             # Retry logic
             if retry_count < self.MAX_RETRIES:
                 delay = self.RETRY_DELAY * (self.RETRY_BACKOFF**retry_count)
@@ -304,7 +281,7 @@ class ElevenLabsAudioService:
         self,
         segment: ScriptSegment,
         segment_index: int,
-        voice_settings: Optional[Dict[str, VoiceSettings]] = None,
+        voice_settings: Optional[Dict[str, AudioVoiceSettings]] = None,
     ) -> Tuple[AudioSegment, AudioSegmentMetrics]:
         """
         Process a single script segment (text or break).
@@ -492,14 +469,87 @@ class ElevenLabsAudioService:
             logger.error(f"Failed to save audio file: {e}", exc_info=True)
             raise IOError(f"Failed to save audio to {file_path}: {e}") from e
 
+    def _generate_mock_response(
+        self,
+        script: PodcastScript,
+        podcast_id: str,
+        start_time: float,
+    ) -> AudioGenerationResponse:
+        """
+        Generate a mock audio response without calling ElevenLabs API.
+
+        This is useful for testing the pipeline without incurring API costs.
+
+        Args:
+            script: Podcast script
+            podcast_id: Podcast identifier
+            start_time: When generation started
+
+        Returns:
+            Mock AudioGenerationResponse with fake file data
+        """
+        # Calculate mock metrics
+        total_characters = sum(len(seg.text) for seg in script.segments if seg.text)
+        estimated_duration = script.estimated_duration_seconds
+        mock_latency_ms = 100  # Pretend it took 100ms
+        cost_estimate = self._calculate_cost(total_characters)
+
+        # Create mock file path
+        mock_file_path = str(self.storage_path / f"MOCK_{podcast_id}.mp3")
+        mock_file_size = estimated_duration * 16000  # Rough estimate: 16KB per second
+
+        # Create mock segment metrics
+        segment_metrics = [
+            AudioSegmentMetrics(
+                segment_index=i,
+                speaker=seg.speaker.value if seg.speaker else None,
+                character_count=len(seg.text) if seg.text else 0,
+                latency_ms=10,
+                success=True,
+                retry_count=0,
+            )
+            for i, seg in enumerate(script.segments)
+        ]
+
+        metrics = AudioMetrics(
+            total_characters=total_characters,
+            total_latency_ms=mock_latency_ms,
+            segment_count=len(script.segments),
+            segment_metrics=segment_metrics,
+            cost_estimate=cost_estimate,
+            api_calls=0,  # No actual API calls in mock mode
+            retries=0,
+            model_used=f"{self.MODEL} (MOCK)",
+        )
+
+        audio_file = AudioFile(
+            podcast_id=podcast_id,
+            file_path=mock_file_path,
+            file_url=None,
+            file_size_bytes=mock_file_size,
+            duration_seconds=float(estimated_duration),
+            format=self.FORMAT,
+            sample_rate=self.SAMPLE_RATE,
+            channels=self.CHANNELS,
+            bitrate_kbps=self.BITRATE,
+            metrics=metrics,
+        )
+
+        logger.info(
+            f"[MOCK MODE] Audio generation completed: podcast_id={podcast_id}, "
+            f"duration={estimated_duration}s, estimated_cost=${cost_estimate:.4f} (not charged)"
+        )
+
+        return AudioGenerationResponse(success=True, audio_file=audio_file)
+
     async def generate_audio(
         self,
         script: PodcastScript,
         podcast_id: str,
-        voice_settings: Optional[Dict[str, VoiceSettings]] = None,
+        voice_settings: Optional[Dict[str, AudioVoiceSettings]] = None,
     ) -> AudioGenerationResponse:
         """
-        Generate complete podcast audio from script.
+        Generate complete podcast audio from script using TTS.
 
         This is the main entry point for audio generation. It:
         1. Processes each script segment (speech or break)
@@ -524,9 +574,12 @@ class ElevenLabsAudioService:
         """
         start_time = time.perf_counter()
 
-        try:
-            await self._ensure_client()
+        # Mock mode: Return fake response without calling API
+        if self.mock_mode:
+            logger.info(f"[MOCK MODE] Skipping ElevenLabs API call for podcast: {podcast_id}")
+            return self._generate_mock_response(script, podcast_id, start_time)
 
+        try:
             logger.info(
                 f"Starting audio generation for podcast: {podcast_id}, "
                 f"segments={len(script.segments)}"
@@ -550,7 +603,7 @@ class ElevenLabsAudioService:
                     audio_segments.append(audio_seg)
                     segment_metrics.append(metrics)
 
-                    if metrics.success and not segment.is_break:
+                    if metrics.success:
                         total_characters += metrics.character_count
                         total_api_calls += 1
 
@@ -650,7 +703,6 @@ async def get_audio_service() -> ElevenLabsAudioService:
     """
     service = ElevenLabsAudioService()
     try:
-        await service._ensure_client()
         yield service
     finally:
         await service.close()

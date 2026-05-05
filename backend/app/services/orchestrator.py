@@ -41,6 +41,7 @@ from sqlalchemy import select
 from app.models.podcast import Podcast, PodcastStatus
 from app.models.metrics import Metrics
 from app.services.news_service import FirecrawlNewsService, FetchedNewsArticle
+from app.services.article_selector_service import ArticleSelectorService
 from app.services.script_service import (
     ScriptGeneratorService,
     NewsArticle,
@@ -92,19 +93,21 @@ class PodcastOrchestrator:
         audio_service: Service for generating audio from scripts
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, mock_audio: bool = False):
         """
         Initialize the PodcastOrchestrator.
 
         Args:
             db: Async SQLAlchemy database session
+            mock_audio: If True, skip ElevenLabs API calls (for testing)
         """
         self.db = db
         self.news_service = FirecrawlNewsService()
+        self.article_selector = ArticleSelectorService()
         self.script_service = ScriptGeneratorService()
-        self.audio_service = ElevenLabsAudioService()
+        self.audio_service = ElevenLabsAudioService(mock_mode=mock_audio)
 
-        logger.info("PodcastOrchestrator initialized")
+        logger.info(f"PodcastOrchestrator initialized (mock_audio={mock_audio})")
 
     async def generate_podcast_async(
         self,
@@ -215,9 +218,21 @@ class PodcastOrchestrator:
 
             # Save script to podcast
             podcast.script = script.get_full_text()
-            podcast.metadata = json.dumps({
+
+            # Collect article information for sources
+            article_sources = [
+                {
+                    "title": article.title,
+                    "source": article.source,
+                    "url": str(article.url),
+                }
+                for article in articles
+            ]
+
+            podcast.podcast_metadata = json.dumps({
                 "topics": script.topics_covered,
                 "sources": script.sources_cited,
+                "articles": article_sources,  # Full article details with URLs
                 "word_count": script.total_word_count,
                 "estimated_duration": script.estimated_duration_seconds,
                 "tone": script.tone.value,
@@ -352,11 +367,11 @@ class PodcastOrchestrator:
         preferences: Dict[str, Any],
     ) -> tuple[List[FetchedNewsArticle], int]:
         """
-        Fetch news articles based on user interests.
+        Fetch news articles using 3-phase flow: search -> AI select -> scrape.
 
         Args:
             interests: List of user interests/topics
-            preferences: User preferences (max_articles, days_back, etc.)
+            preferences: User preferences (tone, length, days_back, etc.)
 
         Returns:
             Tuple of (articles_list, latency_ms)
@@ -367,20 +382,57 @@ class PodcastOrchestrator:
         start_time = datetime.utcnow()
 
         try:
-            max_articles = preferences.get("max_articles", 5)
             days_back = preferences.get("days_back", 7)
-            min_relevance = preferences.get("min_relevance_score", 0.3)
+            tone = preferences.get("tone", "conversational")
+            length = preferences.get("length", "medium")
 
-            articles = await self.news_service.fetch_news(
+            # PHASE 1: Search for candidates
+            logger.info(f"Phase 1: Searching for 10 candidate articles (days_back={days_back})")
+            candidates = await self.news_service.search_news_candidates(
                 interests=interests,
-                max_articles=max_articles,
-                days_back=days_back,
-                min_relevance_score=min_relevance,
+                limit=10,
+                days_back=days_back
             )
+            logger.info(f"Phase 1 complete: Found {len(candidates)} candidates")
+
+            if not candidates:
+                raise PodcastGenerationError(
+                    stage="news_fetch",
+                    message="No candidate articles found for given interests",
+                )
+
+            # PHASE 2: AI Selection
+            logger.info(f"Phase 2: AI selecting best 5 articles from {len(candidates)} candidates")
+            selected_urls = await self.article_selector.select_articles(
+                candidates=candidates,
+                interests=interests,
+                tone=tone,
+                length=length
+            )
+
+            # FALLBACK: If AI fails or returns empty, select top 5 by position
+            if not selected_urls:
+                logger.warning("Phase 2: AI selection returned empty, falling back to top 5 candidates")
+                selected_urls = [article["url"] for article in candidates[:5]]
+
+            logger.info(f"Phase 2 complete: Selected {len(selected_urls)} articles")
+
+            # PHASE 3: Scrape selected (with metadata preservation)
+            logger.info(f"Phase 3: Scraping {len(selected_urls)} selected articles")
+            articles = await self.news_service.scrape_selected_articles(selected_urls, candidates)
+            logger.info(f"Phase 3 complete: Successfully scraped {len(articles)} articles")
+
+            if not articles:
+                raise PodcastGenerationError(
+                    stage="news_fetch",
+                    message="Failed to scrape any of the selected articles",
+                )
 
             latency_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
             return articles, latency_ms
 
+        except PodcastGenerationError:
+            raise
         except Exception as e:
             logger.error(f"News fetching failed: {e}", exc_info=True)
             raise PodcastGenerationError(
@@ -614,6 +666,7 @@ async def trigger_podcast_generation(
     interests: List[str],
     preferences: Dict[str, Any],
     db: AsyncSession,
+    mock_audio: bool = False,
 ) -> None:
     """
     Trigger podcast generation as a background task.
@@ -627,6 +680,7 @@ async def trigger_podcast_generation(
         interests: List of user interests for news filtering
         preferences: User preferences for generation
         db: Async database session
+        mock_audio: If True, skip ElevenLabs API calls (for testing)
 
     Example:
         >>> from fastapi import BackgroundTasks
@@ -655,11 +709,11 @@ async def trigger_podcast_generation(
         ...     return {"podcast_id": str(podcast.id), "status": "pending"}
     """
     logger.info(
-        f"Background task started for podcast {podcast_id}"
+        f"Background task started for podcast {podcast_id} (mock_audio={mock_audio})"
     )
 
     try:
-        orchestrator = PodcastOrchestrator(db)
+        orchestrator = PodcastOrchestrator(db, mock_audio=mock_audio)
         await orchestrator.generate_podcast_async(
             podcast_id=podcast_id,
             user_id=user_id,

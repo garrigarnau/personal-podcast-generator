@@ -49,13 +49,80 @@ class GeneratePodcastRequest(BaseModel):
         examples=[["https://techcrunch.com", "https://arstechnica.com"]]
     )
 
+    mock_audio: bool = Field(
+        default=False,
+        description="If true, skip ElevenLabs API calls for testing (generates script only)"
+    )
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "interests": ["artificial intelligence", "machine learning"],
                 "tone": "professional",
                 "length": 10,
-                "sources": ["https://techcrunch.com"]
+                "sources": ["https://techcrunch.com"],
+                "mock_audio": False
+            }
+        }
+    )
+
+
+class ScriptToAudioRequest(BaseModel):
+    """
+    Request schema for generating audio from a pre-written script.
+
+    This bypasses news fetching and script generation to save API credits.
+
+    Attributes:
+        script_text: Pre-written podcast script with speaker tags
+        tone: Script tone for metadata (professional/casual/educational/conversational)
+        length: Script length for metadata (short/medium/long)
+        mock_audio: If true, skip ElevenLabs API calls (for testing)
+    """
+
+    script_text: str = Field(
+        ...,
+        min_length=50,
+        description="Pre-written script with [ALEX] and [SONIA] tags",
+        examples=[[
+            "[ALEX] (enthusiastic): Welcome to our podcast!\n"
+            "[SONIA] (thoughtful): Thanks for having me.\n"
+            "[BREAK]\n"
+            "[ALEX]: Let's dive in."
+        ]]
+    )
+
+    tone: str = Field(
+        default="professional",
+        description="Script tone for metadata",
+        pattern="^(professional|casual|educational|conversational)$",
+        examples=["professional"]
+    )
+
+    length: str = Field(
+        default="medium",
+        description="Script length category for metadata",
+        pattern="^(short|medium|long)$",
+        examples=["medium"]
+    )
+
+    mock_audio: bool = Field(
+        default=False,
+        description="If true, skip ElevenLabs API calls for testing"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "script_text": (
+                    "[ALEX] (enthusiastic): Welcome!\n"
+                    "[SONIA]: Great to be here.\n"
+                    "[BREAK]\n"
+                    "[ALEX]: Let's discuss today's topics."
+                ),
+                "tone": "professional",
+                "length": "medium",
+                "mock_audio": False
             }
         }
     )
@@ -83,12 +150,13 @@ class PodcastResponse(BaseModel):
     audio_url: Optional[str] = Field(None, description="Audio file URL")
     script: Optional[str] = Field(None, description="Generated podcast script")
     error_message: Optional[str] = Field(None, description="Error details if failed")
-    metadata: Optional[str] = Field(None, description="Additional metadata (JSON)")
+    metadata: Optional[str] = Field(None, description="Additional metadata (JSON)", alias="podcast_metadata")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
 
     model_config = ConfigDict(
         from_attributes=True,
+        populate_by_name=True,
         json_schema_extra={
             "example": {
                 "id": "123e4567-e89b-12d3-a456-426614174000",
@@ -113,13 +181,16 @@ class PodcastStatusResponse(BaseModel):
         id: Podcast identifier
         status: Current generation status
         audio_url: Audio URL if completed
+        script: Generated script (available before audio)
         error_message: Error details if failed
         progress: Optional progress percentage (0-100)
+        metadata: Optional metadata JSON string (topics, sources, articles, etc.)
     """
 
     id: UUID = Field(..., description="Podcast identifier")
     status: str = Field(..., description="Generation status")
     audio_url: Optional[str] = Field(None, description="Audio URL if completed")
+    script: Optional[str] = Field(None, description="Generated podcast script")
     error_message: Optional[str] = Field(None, description="Error details if failed")
     progress: Optional[int] = Field(
         None,
@@ -127,6 +198,7 @@ class PodcastStatusResponse(BaseModel):
         le=100,
         description="Progress percentage (0-100)"
     )
+    metadata: Optional[str] = Field(None, description="Metadata JSON string")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -134,6 +206,7 @@ class PodcastStatusResponse(BaseModel):
                 "id": "123e4567-e89b-12d3-a456-426614174000",
                 "status": "processing",
                 "audio_url": None,
+                "script": "[ALEX]: Welcome to today's podcast...",
                 "error_message": None,
                 "progress": 45
             }

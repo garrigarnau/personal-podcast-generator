@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from collections import Counter
 import re
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, HttpUrl, validator
 from firecrawl import FirecrawlApp
@@ -164,6 +165,166 @@ class FirecrawlNewsService:
         self._total_cost = 0.0
         self._request_timestamps: List[datetime] = []
 
+    async def search_news_candidates(
+        self,
+        interests: List[str],
+        limit: int = 10,
+        days_back: int = 7
+    ) -> List[Dict[str, Any]]:
+        """
+        PHASE 1: Search for news article candidates without scraping full content.
+
+        Uses Firecrawl search WITHOUT scrapeOptions to save credits.
+        Returns metadata only (title, description, url, source, date, position).
+
+        Args:
+            interests: List of user interest keywords/topics
+            limit: Maximum number of candidates to return
+            days_back: Only include articles from last N days
+
+        Returns:
+            List of dicts with: title, description, url, source, date, position
+        """
+        if not interests:
+            logger.warning("No interests provided, returning empty results")
+            return []
+
+        logger.info(f"Searching news candidates: interests={interests}, limit={limit}, days_back={days_back}")
+
+        try:
+            await self._check_rate_limit()
+
+            query = self._build_search_query(interests)
+            logger.debug(f"Search query: {query}")
+
+            for attempt in range(self.max_retries):
+                try:
+                    result = await asyncio.to_thread(
+                        self._execute_search_candidates,
+                        query,
+                        limit
+                    )
+                    self._track_request(cost=self.SEARCH_COST_PER_REQUEST)
+
+                    if not result:
+                        logger.warning("No candidates found from search")
+                        return []
+
+                    logger.info(f"Found {len(result)} candidates")
+
+                    # Filter by date and extract metadata
+                    candidates = []
+                    cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+
+                    for item in result:
+                        try:
+                            data = item.model_dump() if hasattr(item, 'model_dump') else item
+
+                            pub_date = self._extract_date(data) or datetime.utcnow()
+                            if pub_date < cutoff_date:
+                                continue
+
+                            # Extract domain from URL for source
+                            url_str = str(data.get('url', ''))
+                            parsed_url = urlparse(url_str) if url_str else None
+                            domain = parsed_url.netloc.replace('www.', '') if parsed_url and parsed_url.netloc else None
+                            source = domain or data.get('source') or data.get('domain') or 'Unknown'
+
+                            candidate = {
+                                'title': data.get('title') or data.get('headline') or 'Untitled',
+                                'description': data.get('description') or data.get('summary') or '',
+                                'url': data.get('url') or data.get('link') or '',
+                                'source': source,
+                                'date': pub_date.isoformat(),
+                                'position': len(candidates),  # Track position in search results
+                            }
+
+                            if candidate['url']:
+                                candidates.append(candidate)
+
+                        except Exception as e:
+                            logger.warning(f"Failed to extract candidate metadata: {e}")
+                            continue
+
+                    logger.info(f"Returning {len(candidates)} candidates after date filtering")
+                    return candidates
+
+                except Exception as e:
+                    logger.warning(f"Search attempt {attempt + 1}/{self.max_retries} failed: {e}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                    else:
+                        raise APIError(f"Search failed after {self.max_retries} attempts: {e}")
+
+            return []
+
+        except RateLimitError:
+            logger.error("Rate limit exceeded")
+            raise
+        except Exception as e:
+            logger.error(f"Error searching news candidates: {e}", exc_info=True)
+            raise FirecrawlNewsServiceError(f"Failed to search news candidates: {e}")
+
+    async def scrape_selected_articles(
+        self,
+        urls: List[str],
+        candidates_metadata: Optional[Dict[str, Dict]] = None
+    ) -> List[FetchedNewsArticle]:
+        """
+        PHASE 3: Scrape full content for selected article URLs.
+
+        Uses Firecrawl scrape with formats: ["markdown"] to get full content.
+        Scrapes each URL individually, skipping failed ones.
+        Preserves metadata from search phase (source, date) if provided.
+
+        Args:
+            urls: List of article URLs to scrape
+            candidates_metadata: Optional dict mapping URL to metadata from search phase
+
+        Returns:
+            List of FetchedNewsArticle objects with full content
+        """
+        if not urls:
+            logger.warning("No URLs provided for scraping")
+            return []
+
+        logger.info(f"Scraping {len(urls)} selected articles")
+
+        # Create URL to metadata lookup dict
+        metadata_lookup = {}
+        if candidates_metadata:
+            metadata_lookup = {meta.get('url'): meta for meta in candidates_metadata if meta.get('url')}
+            logger.info(f"Using metadata override for {len(metadata_lookup)} articles")
+
+        articles = []
+        for url in urls:
+            try:
+                await self._check_rate_limit()
+
+                logger.debug(f"Scraping: {url}")
+                result = await asyncio.to_thread(
+                    self._execute_scrape,
+                    url
+                )
+
+                self._track_request(cost=self.SCRAPE_COST_PER_PAGE)
+
+                if result:
+                    # Get metadata override for this URL
+                    metadata_override = metadata_lookup.get(url)
+
+                    article = self._parse_article(result, metadata_override=metadata_override)
+                    if article:
+                        articles.append(article)
+                        logger.debug(f"Successfully scraped: {article.title[:50]}")
+
+            except Exception as e:
+                logger.warning(f"Failed to scrape {url}: {e}")
+                continue
+
+        logger.info(f"Successfully scraped {len(articles)}/{len(urls)} articles")
+        return articles
+
     async def fetch_news(
         self,
         interests: List[str],
@@ -299,9 +460,123 @@ class FirecrawlNewsService:
 
         return []
 
+    def _execute_search_candidates(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Execute search for news and web content without scraping full content.
+
+        Searches both "news" and "web" sources to get trending articles and general
+        web content. Returns metadata only (no full content scraping) to save credits.
+
+        Args:
+            query: Search query string
+            limit: Maximum results
+
+        Returns:
+            List of search results with metadata only (no full content)
+        """
+        logger.debug(f"Executing search for candidates: '{query}' with limit: {limit}")
+
+        try:
+            logger.debug("Searching with sources=['news', 'web']")
+            response = self.client.search(query, limit=limit, sources=["news", "web"])
+            logger.info(f"Search successful - Response type: {type(response)}")
+
+            results = self._extract_search_results(response)
+            logger.info(f"Extracted {len(results)} candidates from search")
+            return results
+
+        except Exception as e:
+            logger.error(f"Search failed: {e}", exc_info=True)
+            raise
+
+    def _execute_scrape(self, url: str) -> Dict[str, Any]:
+        """
+        Execute scrape for a single URL with markdown format.
+
+        Args:
+            url: Article URL to scrape
+
+        Returns:
+            Scraped article data with full markdown content
+        """
+        logger.debug(f"Executing scrape for URL: {url}")
+
+        try:
+            response = self.client.scrape(url, formats=['markdown'])
+            logger.debug(f"Scrape response type: {type(response)}")
+
+            if hasattr(response, 'model_dump'):
+                result = response.model_dump()
+            elif isinstance(response, dict):
+                result = response
+            else:
+                logger.warning(f"Unexpected scrape response type: {type(response)}")
+                return {}
+
+            logger.debug(f"Scrape successful for {url}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Scrape failed for {url}: {e}")
+            raise
+
+    def _extract_search_results(self, response: Any) -> List[Dict[str, Any]]:
+        """
+        Extract search results using progressive fallback strategies.
+
+        Tries multiple strategies to extract results from various Firecrawl response formats.
+
+        Args:
+            response: API response in unknown format
+
+        Returns:
+            List of result dictionaries/objects
+        """
+        logger.debug(f"_extract_search_results called with type: {type(response)}")
+
+        # STRATEGY 1: Try response.web + response.news (Firecrawl v2 direct attributes)
+        if hasattr(response, 'web') or hasattr(response, 'news'):
+            results = []
+            if hasattr(response, 'web') and response.web:
+                results.extend(response.web if isinstance(response.web, list) else [response.web])
+            if hasattr(response, 'news') and response.news:
+                results.extend(response.news if isinstance(response.news, list) else [response.news])
+            if results:
+                logger.info(f"Extracted {len(results)} results using direct web/news attributes")
+                return results
+
+        # STRATEGY 2: Try response.data as list
+        if hasattr(response, 'data') and isinstance(response.data, list):
+            logger.info(f"Extracted {len(response.data)} results using response.data as list")
+            return response.data
+
+        # STRATEGY 3: Try model_dump() with web/news keys
+        if hasattr(response, 'model_dump'):
+            try:
+                dumped = response.model_dump()
+                if isinstance(dumped, dict):
+                    results = []
+                    if 'web' in dumped:
+                        results.extend(dumped['web'] if isinstance(dumped['web'], list) else [dumped['web']])
+                    if 'news' in dumped:
+                        results.extend(dumped['news'] if isinstance(dumped['news'], list) else [dumped['news']])
+                    if results:
+                        logger.info(f"Extracted {len(results)} results using model_dump web/news")
+                        return results
+            except Exception as e:
+                logger.debug(f"model_dump strategy failed: {e}")
+
+        # STRATEGY 4: Response is already a list
+        if isinstance(response, list):
+            logger.info(f"Extracted {len(response)} results (response is list)")
+            return response
+
+        logger.warning(f"All extraction strategies failed. Response type: {type(response)}")
+        return []
+
     def _execute_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
         """
-        Execute synchronous search call to Firecrawl API.
+        Execute synchronous search call to Firecrawl API (legacy method).
 
         Args:
             query: Search query string
@@ -435,24 +710,40 @@ class FirecrawlNewsService:
 
         return None
 
-    def _parse_article(self, data: Dict[str, Any]) -> Optional[FetchedNewsArticle]:
+    def _parse_article(
+        self,
+        data: Dict[str, Any],
+        metadata_override: Optional[Dict[str, Any]] = None
+    ) -> Optional[FetchedNewsArticle]:
         """
         Parse raw article data into FetchedNewsArticle model.
 
         Args:
-            data: Raw article data from API
+            data: Raw article data from API (dict or Pydantic model)
+            metadata_override: Optional metadata from search phase (source, date) to override scraped data
 
         Returns:
             FetchedNewsArticle instance or None if parsing fails
         """
         try:
-            # Extract fields with fallbacks
-            title = data.get('title') or data.get('headline') or 'Untitled'
+            # Convert Pydantic model to dict if needed
+            if hasattr(data, 'model_dump'):
+                data = data.model_dump()
+            elif not isinstance(data, dict):
+                logger.warning(f"Unexpected data type: {type(data)}")
+                return None
 
-            # Content can be in various fields
+            # Extract metadata object (Firecrawl v2 nested structure)
+            metadata = data.get('metadata', {})
+
+            # Extract fields with fallbacks
+            title = metadata.get('title') or data.get('title') or data.get('headline') or 'Untitled'
+
+            # Content - prioritize markdown from scrapeOptions, then fallback to other fields
+            # Firecrawl returns full article as markdown when using scrapeOptions
             content = (
+                data.get('markdown') or      # From scrapeOptions: { formats: ["markdown"] }
                 data.get('content') or
-                data.get('markdown') or
                 data.get('text') or
                 data.get('description') or
                 ''
@@ -460,16 +751,42 @@ class FirecrawlNewsService:
 
             if len(content) < 50:
                 logger.debug(f"Article content too short, skipping: {title}")
+                logger.debug(f"Available fields: {list(data.keys())}")
                 return None
+
+            # Determine source and published_date
+            # Priority: metadata_override > scraped metadata > scraped data > defaults
+            if metadata_override:
+                source = metadata_override.get('source') or metadata.get('source') or data.get('source') or data.get('domain') or 'Unknown'
+
+                # Parse date from metadata_override if it's a string
+                override_date = metadata_override.get('date')
+                if override_date:
+                    try:
+                        if isinstance(override_date, str):
+                            published_date = datetime.fromisoformat(override_date.replace('Z', '+00:00'))
+                        elif isinstance(override_date, datetime):
+                            published_date = override_date
+                        else:
+                            published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                    except (ValueError, AttributeError):
+                        published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                else:
+                    published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+
+                logger.info(f"Using metadata override for article: source={source}, date={published_date}")
+            else:
+                source = metadata.get('source') or data.get('source') or data.get('domain') or 'Unknown'
+                published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
 
             # Build FetchedNewsArticle
             article = FetchedNewsArticle(
                 title=title,
                 content=content,
                 summary=data.get('summary') or data.get('excerpt'),
-                source=data.get('source') or data.get('domain') or 'Unknown',
-                author=data.get('author'),
-                published_date=data.get('published_date') or data.get('publishedAt') or datetime.utcnow(),
+                source=source,
+                author=metadata.get('author') or data.get('author'),
+                published_date=published_date,
                 url=data.get('url') or data.get('link') or 'https://example.com',
                 topics=data.get('topics') or data.get('categories') or [],
             )

@@ -15,9 +15,10 @@ const LENGTH_OPTIONS: { value: PodcastLength; label: string; duration: string; d
 ];
 
 const TONE_OPTIONS: { value: PodcastTone; label: string; description: string }[] = [
-  { value: 'serious', label: 'Serious', description: 'Professional and informative' },
-  { value: 'balanced', label: 'Balanced', description: 'Mix of professional and conversational' },
+  { value: 'professional', label: 'Professional', description: 'Formal and informative' },
+  { value: 'conversational', label: 'Conversational', description: 'Engaging and natural' },
   { value: 'casual', label: 'Casual', description: 'Relaxed and friendly' },
+  { value: 'educational', label: 'Educational', description: 'Teaching and explanatory' },
 ];
 
 export const CustomizationPanel: React.FC<CustomizationPanelProps> = ({
@@ -84,7 +85,7 @@ export const CustomizationPanel: React.FC<CustomizationPanelProps> = ({
             Podcast Tone
           </h3>
         </div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {TONE_OPTIONS.map((option) => (
             <button
               key={option.value}

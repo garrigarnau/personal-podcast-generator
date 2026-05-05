@@ -24,6 +24,7 @@ class AudioSegmentMetrics(BaseModel):
         latency_ms: Time taken to generate this segment
         voice_id: ElevenLabs voice ID used
         success: Whether generation was successful
+        retry_count: Number of retry attempts for this segment
         error_message: Error details if generation failed
     """
 
@@ -33,6 +34,7 @@ class AudioSegmentMetrics(BaseModel):
     latency_ms: int = Field(..., ge=0)
     voice_id: Optional[str] = None
     success: bool = True
+    retry_count: int = Field(default=0, ge=0)
     error_message: Optional[str] = None
 
 
@@ -48,7 +50,7 @@ class AudioMetrics(BaseModel):
         cost_estimate: Estimated cost in USD
         api_calls: Number of API calls made to ElevenLabs
         retries: Number of retry attempts
-        elevenlabs_model: ElevenLabs model identifier
+        model_used: ElevenLabs model identifier (e.g., eleven_flash_v2_5)
     """
 
     total_characters: int = Field(..., ge=0)
@@ -58,7 +60,7 @@ class AudioMetrics(BaseModel):
     cost_estimate: float = Field(..., ge=0)
     api_calls: int = Field(..., ge=0)
     retries: int = Field(default=0, ge=0)
-    elevenlabs_model: str = "multilingual_v2"
+    model_used: str = "eleven_flash_v2_5"
 
 
 class AudioFile(BaseModel):

@@ -9,6 +9,7 @@ from app.services.script_service import (
     LengthType,
     SpeakerType,
     generate_podcast_script,
+    parse_script_text,
 )
 
 from app.services.news_service import (
@@ -52,6 +53,7 @@ __all__ = [
     "LengthType",
     "SpeakerType",
     "generate_podcast_script",
+    "parse_script_text",
     # News fetching
     "FirecrawlNewsService",
     "FetchedNewsArticle",

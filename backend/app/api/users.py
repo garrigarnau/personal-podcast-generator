@@ -111,6 +111,51 @@ async def create_user(
 
 
 @router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user profile",
+    description=(
+        "Retrieve authenticated user's profile including preferences, schedule settings, "
+        "and metadata."
+    ),
+    responses={
+        200: {
+            "description": "User retrieved successfully",
+        },
+        401: {
+            "description": "Not authenticated",
+        }
+    }
+)
+async def get_current_user_profile(
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_session),
+) -> UserResponse:
+    """
+    Get current authenticated user's profile.
+
+    This endpoint retrieves complete user information including preferences,
+    schedule settings, and timestamps.
+
+    Args:
+        current_user: Current authenticated user
+        session: Database session
+
+    Returns:
+        UserResponse with user details
+    """
+    logger.debug(f"Fetching profile for user_id={current_user.id}")
+
+    return UserResponse(
+        id=current_user.id,
+        preferences=current_user.preferences,
+        schedule_settings=current_user.schedule_settings,
+        created_at=current_user.created_at,
+        updated_at=current_user.updated_at,
+    )
+
+
+@router.get(
     "/{user_id}",
     response_model=UserResponse,
     summary="Get user profile",

@@ -143,11 +143,15 @@ function parseError(error: unknown): ApiError {
  * Generate a new podcast based on interests and preferences
  */
 export async function generatePodcast(
-  request: GeneratePodcastRequest
+  request: GeneratePodcastRequest,
+  mockAudio: boolean = false
 ): Promise<GeneratePodcastResponse> {
   try {
     const response = await withRetry(() =>
-      apiClient.post<GeneratePodcastResponse>('/api/podcasts/generate', request)
+      apiClient.post<GeneratePodcastResponse>('/api/v1/podcasts/generate', {
+        ...request,
+        mock_audio: mockAudio,
+      })
     );
     return response.data;
   } catch (error) {
@@ -163,7 +167,7 @@ export async function getPodcastStatus(
 ): Promise<PodcastStatusResponse> {
   try {
     const response = await apiClient.get<PodcastStatusResponse>(
-      `/api/podcasts/${podcastId}/status`
+      `/api/v1/podcasts/${podcastId}/status`
     );
     return response.data;
   } catch (error) {
@@ -179,13 +183,25 @@ export async function getPodcasts(
   pageSize: number = 100
 ): Promise<{ podcasts: any[]; total: number }> {
   try {
-    const response = await apiClient.get(`/api/podcasts/`, {
+    const response = await apiClient.get(`/api/v1/podcasts/`, {
       params: { page, page_size: pageSize },
     });
     return response.data;
   } catch (error) {
     throw parseError(error);
   }
+}
+
+/**
+ * Get authenticated audio blob URL for playback
+ */
+export async function getAudioBlobUrl(podcastId: string): Promise<string> {
+  const response = await apiClient.get(`/api/v1/podcasts/${podcastId}/audio`, {
+    responseType: 'blob',
+  });
+
+  // Create a blob URL that can be used by audio elements
+  return window.URL.createObjectURL(new Blob([response.data], { type: 'audio/mpeg' }));
 }
 
 /**
@@ -196,7 +212,7 @@ export async function downloadPodcast(
   filename?: string
 ): Promise<void> {
   try {
-    const response = await apiClient.get(`/api/podcasts/${podcastId}/audio`, {
+    const response = await apiClient.get(`/api/v1/podcasts/${podcastId}/audio`, {
       responseType: 'blob',
     });
 
@@ -227,7 +243,7 @@ export async function getAdminStats(
   try {
     const params = days ? { days } : {};
     const response = await withRetry(() =>
-      apiClient.get<AdminStats>('/api/admin/stats', { params })
+      apiClient.get<AdminStats>('/api/v1/admin/stats', { params })
     );
     return response.data;
   } catch (error) {
@@ -252,6 +268,18 @@ export async function checkHealth(): Promise<{ status: string }> {
 // ============================================================================
 
 /**
+ * Get current user profile with preferences
+ */
+export async function getCurrentUser(): Promise<any> {
+  try {
+    const response = await apiClient.get('/api/v1/users/me');
+    return response.data;
+  } catch (error) {
+    throw parseError(error);
+  }
+}
+
+/**
  * Update user preferences
  */
 export async function updateUserPreferences(data: {
@@ -260,7 +288,7 @@ export async function updateUserPreferences(data: {
   language?: string;
 }): Promise<any> {
   try {
-    const response = await apiClient.put('/api/users/me/preferences', data);
+    const response = await apiClient.put('/api/v1/users/me/preferences', data);
     return response.data;
   } catch (error) {
     throw parseError(error);
@@ -278,7 +306,7 @@ export async function updateScheduleSettings(data: {
   days_of_week?: number[];
 }): Promise<any> {
   try {
-    const response = await apiClient.put('/api/users/me/schedule', data);
+    const response = await apiClient.put('/api/v1/users/me/schedule', data);
     return response.data;
   } catch (error) {
     throw parseError(error);
@@ -315,7 +343,7 @@ export async function pollPodcastStatus(
       onUpdate(status);
 
       // Check if done
-      if (status.podcast.status === 'completed' || status.podcast.status === 'failed') {
+      if (status.status === 'completed' || status.status === 'failed') {
         return status;
       }
 

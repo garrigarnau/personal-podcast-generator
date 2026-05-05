@@ -40,9 +40,10 @@ logging.basicConfig(
 
 class ToneType(str, Enum):
     """Podcast tone types."""
-    SERIOUS = "serious"
+    PROFESSIONAL = "professional"
     CASUAL = "casual"
-    BALANCED = "balanced"
+    EDUCATIONAL = "educational"
+    CONVERSATIONAL = "conversational"
 
 
 class LengthType(str, Enum):
@@ -268,8 +269,22 @@ class ScriptGeneratorService:
             raise ValueError("At least one news article is required")
 
         # Extract preferences
-        tone = ToneType(preferences.get("tone", "balanced").lower())
-        length = LengthType(preferences.get("length", "medium").lower())
+        tone = ToneType(preferences.get("tone", "professional").lower())
+
+        # Handle length - can be either int (minutes) or string ("short"/"medium"/"long")
+        length_value = preferences.get("length", "medium")
+        if isinstance(length_value, int):
+            # Convert minutes to length category
+            if length_value <= 7:
+                length_str = "short"
+            elif length_value <= 12:
+                length_str = "medium"
+            else:
+                length_str = "long"
+        else:
+            length_str = str(length_value).lower()
+
+        length = LengthType(length_str)
 
         logger.info(
             f"Generating script: tone={tone.value}, length={length.value}, "
@@ -379,29 +394,37 @@ class ScriptGeneratorService:
 Your task is to create a natural, flowing conversation that feels authentic and engaging."""
 
         tone_instructions = {
-            ToneType.SERIOUS: """
-TONE: Professional and informative
+            ToneType.PROFESSIONAL: """
+TONE: Professional and authoritative
 - Focus on facts, data, and expert analysis
-- Maintain respectful, thoughtful discourse
-- Use clear, precise language
-- Include relevant statistics and context
-- Acknowledge complexity and nuance""",
+- Maintain formal, polished delivery
+- Use precise, industry-standard terminology
+- Present information with credibility and depth
+- Appeal to informed audiences seeking expertise""",
 
             ToneType.CASUAL: """
-TONE: Conversational and approachable
+TONE: Casual and relaxed
 - Use everyday language and relatable examples
 - Include light humor and personal reactions
 - Show genuine curiosity and surprise
-- Make complex topics accessible
+- Make complex topics accessible and fun
 - Feel like a conversation between friends""",
 
-            ToneType.BALANCED: """
-TONE: Professional yet accessible
-- Balance expertise with approachability
-- Use clear language with occasional technical terms
-- Include both data and human interest angles
-- Maintain credibility while being engaging
-- Appeal to both casual listeners and enthusiasts"""
+            ToneType.EDUCATIONAL: """
+TONE: Educational and informative
+- Explain concepts clearly with teaching intent
+- Break down complex ideas into understandable parts
+- Provide context, background, and examples
+- Guide listeners through learning journey
+- Focus on understanding and knowledge building""",
+
+            ToneType.CONVERSATIONAL: """
+TONE: Conversational and engaging
+- Natural, flowing dialogue style
+- Balance information with entertainment
+- Use storytelling and narrative techniques
+- Encourage curiosity and exploration
+- Keep listeners engaged through dynamic exchanges"""
         }
 
         format_instructions = """
@@ -676,7 +699,7 @@ Focus on the most interesting angles, surprising facts, and different perspectiv
 
 async def generate_podcast_script(
     articles: List[NewsArticle],
-    tone: str = "balanced",
+    tone: str = "professional",
     length: str = "medium"
 ) -> tuple[PodcastScript, GenerationMetrics]:
     """
@@ -684,7 +707,7 @@ async def generate_podcast_script(
 
     Args:
         articles: List of news articles
-        tone: Tone preference (serious/casual/balanced)
+        tone: Tone preference (professional/casual/educational/conversational)
         length: Length preference (short/medium/long)
 
     Returns:
@@ -703,3 +726,130 @@ async def generate_podcast_script(
         news_articles=articles,
         preferences={"tone": tone, "length": length}
     )
+
+
+def parse_script_text(
+    script_text: str,
+    tone: str = "professional",
+    length: str = "medium"
+) -> PodcastScript:
+    """
+    Parse a manually written script text into a PodcastScript object.
+
+    This function allows you to bypass news fetching and AI script generation
+    by directly providing a pre-written script in the standard format.
+
+    Expected format:
+        [ALEX] (emotion): dialogue text
+        [SONIA] (emotion): dialogue text
+        [BREAK]
+        [CLOSING]
+        [END]
+
+    Args:
+        script_text: Raw script text with speaker tags and markers
+        tone: Tone type for metadata (professional/casual/educational/conversational)
+        length: Length type for metadata (short/medium/long)
+
+    Returns:
+        PodcastScript object ready for audio generation
+
+    Example:
+        script_text = '''
+        [ALEX] (enthusiastic): Welcome to our podcast!
+        [SONIA] (thoughtful): Thanks for having me.
+        [BREAK]
+        [ALEX]: Let's dive into today's topics.
+        '''
+        script = parse_script_text(script_text, tone="casual", length="short")
+    """
+    import re
+
+    segments: List[ScriptSegment] = []
+    order = 0
+
+    # Split by lines and process
+    lines = script_text.strip().split('\n')
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Check for [BREAK] marker
+        if '[BREAK]' in line.upper():
+            # Mark the previous segment to pause after
+            if segments:
+                segments[-1].pause_after = True
+            continue
+
+        # Check for special markers to skip
+        if any(marker in line.upper() for marker in ['[CLOSING]', '[END]', '```']):
+            continue
+
+        # Match speaker pattern: [SPEAKER] (emotion): text or [SPEAKER]: text
+        speaker_pattern = r'\[(' + '|'.join([s.value for s in SpeakerType]) + r')\]\s*(?:\(([^)]+)\))?\s*:\s*(.+)'
+        match = re.match(speaker_pattern, line, re.IGNORECASE)
+
+        if match:
+            speaker_name = match.group(1).upper()
+            emotion = match.group(2)
+            text = match.group(3).strip()
+
+            # Map to SpeakerType
+            try:
+                speaker = SpeakerType(speaker_name)
+            except ValueError:
+                logger.warning(f"Unknown speaker: {speaker_name}, skipping line")
+                continue
+
+            # Create segment
+            segment = ScriptSegment(
+                speaker=speaker,
+                text=text,
+                order=order,
+                emotion=emotion,
+                pause_after=False
+            )
+            segments.append(segment)
+            order += 1
+
+    if not segments:
+        raise ValueError("No valid segments found in script text")
+
+    # Calculate metadata
+    total_words = sum(len(segment.text.split()) for segment in segments)
+    estimated_duration = int(total_words / 2.5 * 60)  # Assume 150 WPM
+
+    # Map tone and length to enums
+    try:
+        tone_enum = ToneType(tone)
+    except ValueError:
+        tone_enum = ToneType.PROFESSIONAL
+
+    try:
+        length_enum = LengthType(length)
+    except ValueError:
+        length_enum = LengthType.MEDIUM
+
+    # Create PodcastScript
+    script = PodcastScript(
+        segments=segments,
+        total_word_count=total_words,
+        estimated_duration_seconds=estimated_duration,
+        tone=tone_enum,
+        length=length_enum,
+        topics_covered=["Manual Script"],
+        sources_cited=["User Provided"],
+        generation_metadata={
+            "source": "manual_input",
+            "parsed_segments": len(segments),
+        }
+    )
+
+    logger.info(
+        f"Parsed script: {len(segments)} segments, {total_words} words, "
+        f"~{estimated_duration}s duration"
+    )
+
+    return script

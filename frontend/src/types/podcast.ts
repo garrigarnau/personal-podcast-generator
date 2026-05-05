@@ -2,11 +2,27 @@ export type PodcastStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 export type PodcastLength = 'short' | 'medium' | 'long';
 
-export type PodcastTone = 'serious' | 'balanced' | 'casual';
+export type PodcastTone = 'professional' | 'casual' | 'educational' | 'conversational';
 
 export interface PodcastPreferences {
   length: PodcastLength;
   tone: PodcastTone;
+}
+
+export interface ArticleSource {
+  title: string;
+  source: string;
+  url: string;
+}
+
+export interface PodcastMetadata {
+  topics?: string[];
+  sources?: string[];
+  articles?: ArticleSource[];
+  word_count?: number;
+  estimated_duration?: number;
+  tone?: string;
+  length?: string;
 }
 
 export interface Podcast {
@@ -23,19 +39,31 @@ export interface Podcast {
   interests?: string[];
   preferences?: PodcastPreferences;
   duration?: number; // Duration in seconds
+  parsedMetadata?: PodcastMetadata;
 }
 
 export interface GeneratePodcastRequest {
   interests: string[];
-  preferences: PodcastPreferences;
+  tone: string;
+  length: number;
+  sources?: string[];
 }
 
 export interface GeneratePodcastResponse {
-  podcastId: string;
+  id: string;
   status: PodcastStatus;
-  message: string;
+  audio_url?: string;
+  script?: string;
+  error_message?: string;
+  progress?: number;
 }
 
 export interface PodcastStatusResponse {
-  podcast: Podcast;
+  id: string;
+  status: PodcastStatus;
+  audio_url?: string;
+  script?: string;
+  error_message?: string;
+  progress?: number;
+  metadata?: string;
 }
