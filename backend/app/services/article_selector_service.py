@@ -24,7 +24,8 @@ class ArticleSelectorService:
         length: str
     ) -> List[str]:
         """
-        Select the 5 most relevant articles from candidates based on user preferences.
+        Select the most relevant articles from candidates based on user preferences.
+        The AI determines the optimal number of articles to comprehensively cover all user interests.
 
         Args:
             candidates: List of article dicts with title, description, url, source, date
@@ -33,18 +34,14 @@ class ArticleSelectorService:
             length: Desired length preference
 
         Returns:
-            List of 5 selected article URLs
+            List of selected article URLs (variable count based on AI decision)
         """
         try:
             if not candidates:
                 logger.warning("No candidate articles provided")
                 return []
 
-            if len(candidates) <= 5:
-                logger.info(f"Only {len(candidates)} candidates, returning all")
-                return [article["url"] for article in candidates]
-
-            system_prompt = self._build_system_prompt()
+            system_prompt = self._build_system_prompt(interests)
             user_prompt = self._build_user_prompt(candidates, interests, tone, length)
 
             response = await self.client.chat.completions.create(
@@ -62,42 +59,47 @@ class ArticleSelectorService:
             parsed_result = json.loads(result)
             selected_urls = parsed_result.get("selected_urls", [])
 
-            if len(selected_urls) != 5:
-                logger.warning(f"Expected 5 URLs but got {len(selected_urls)}")
-                selected_urls = selected_urls[:5] if len(selected_urls) > 5 else selected_urls
+            if not selected_urls:
+                logger.warning("No URLs selected by AI, falling back to all candidates")
+                selected_urls = [article["url"] for article in candidates]
 
             logger.info(f"Successfully selected {len(selected_urls)} articles")
             return selected_urls
 
         except Exception as e:
             logger.error(f"Error selecting articles: {str(e)}")
-            return [article["url"] for article in candidates[:5]]
+            return [article["url"] for article in candidates]
 
-    def _build_system_prompt(self) -> str:
-        return """You are an expert content curator for a personalized podcast service.
+    def _build_system_prompt(self, interests: List[str]) -> str:
+        interests_text = ", ".join(interests) if interests else "general news"
+        return f"""You are an expert content curator for a personalized podcast service.
 
-Your task is to select exactly 5 articles from a list of candidates that will create the best podcast experience for the user.
+Your task is to select AS MANY articles as needed to comprehensively cover ALL user interests from the list of candidates. The goal is to create the best, most complete podcast experience for the user.
 
 Selection criteria (in priority order):
-1. Relevance to user interests - Choose articles that closely match the user's stated interests
-2. Source credibility - Prioritize reputable news sources and publications
-3. Diversity - Ensure variety in topics, perspectives, and angles to create engaging content
-4. Tone match - Select articles that align with the user's preferred tone
-5. Recency - Prefer more recent articles when other factors are equal
+1. Comprehensive coverage - Ensure at least one article per interest: {interests_text}
+2. Relevance to user interests - Choose articles that closely match the user's stated interests
+3. Source credibility - Prioritize reputable news sources and publications
+4. Diversity - Ensure variety in topics, perspectives, and angles to create engaging content
+5. Tone match - Select articles that align with the user's preferred tone
+6. Recency - Prefer more recent articles when other factors are equal
 
 Important guidelines:
-- You MUST select exactly 5 articles
-- Prioritize quality over quantity - choose the most impactful and relevant content
+- Select AS MANY articles as needed to comprehensively cover ALL user interests
+- Prioritize diversity and relevance over quantity
+- Ensure at least one article per user interest when possible
 - Avoid redundant articles covering the same story
 - Consider how the articles will flow together in a podcast format
 - Balance depth with breadth across the user's interests
+- It's acceptable to select fewer articles if candidates are limited or redundant
+- It's acceptable to select more articles if needed for comprehensive coverage
 
 Return your selection as a JSON object with this exact format:
-{
-  "selected_urls": ["url1", "url2", "url3", "url4", "url5"]
-}
+{{
+  "selected_urls": ["url1", "url2", "url3", ...]
+}}
 
-Only include the URLs, nothing else in the array."""
+Only include the URLs, nothing else in the array. The number of URLs is flexible based on comprehensive coverage needs."""
 
     def _build_user_prompt(
         self,
@@ -126,4 +128,4 @@ Available Articles ({len(candidates)} total):
 
 {articles_text}
 
-Please select exactly 5 articles that would create the best personalized podcast for this user."""
+Please select AS MANY articles as needed to comprehensively cover all of the user's interests. Ensure diverse, relevant coverage rather than limiting to an arbitrary number."""

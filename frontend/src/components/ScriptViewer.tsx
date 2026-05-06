@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, ChevronDown, ChevronUp, Copy, Check, ExternalLink } from 'lucide-react';
+import { FileText, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react';
 
 interface ScriptLine {
   type: 'speaker' | 'break';
@@ -8,19 +8,12 @@ interface ScriptLine {
   text?: string;
 }
 
-interface ArticleSource {
-  title: string;
-  source: string;
-  url: string;
-}
-
 interface ScriptViewerProps {
   script: string;
   isExpanded?: boolean;
-  articles?: ArticleSource[];
 }
 
-const ScriptViewer: React.FC<ScriptViewerProps> = ({ script, isExpanded: initialExpanded = false, articles }) => {
+const ScriptViewer: React.FC<ScriptViewerProps> = ({ script, isExpanded: initialExpanded = false }) => {
   const [isExpanded, setIsExpanded] = useState(initialExpanded);
   const [copied, setCopied] = useState(false);
 
@@ -168,36 +161,6 @@ const ScriptViewer: React.FC<ScriptViewerProps> = ({ script, isExpanded: initial
             <p className="text-center text-gray-500 py-8">
               No script content available
             </p>
-          )}
-
-          {/* Sources Section */}
-          {articles && articles.length > 0 && (
-            <div className="mt-6 pt-6 border-t border-gray-200">
-              <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                <ExternalLink size={16} />
-                Sources
-              </h4>
-              <div className="space-y-2">
-                {articles.map((article, index) => (
-                  <div key={index} className="flex items-start gap-2 text-sm">
-                    <span className="text-gray-500 font-medium">{index + 1}.</span>
-                    <div className="flex-1">
-                      <a
-                        href={article.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
-                      >
-                        {article.title}
-                      </a>
-                      <div className="text-gray-500 text-xs mt-0.5">
-                        {article.source}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
           )}
         </div>
       )}

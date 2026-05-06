@@ -43,6 +43,7 @@ class Podcast(Base):
     Attributes:
         id: Unique podcast identifier (UUID)
         user_id: Foreign key to users table
+        title: AI-generated title for the podcast
         script: Generated podcast script text
         audio_url: URL or path to generated audio file
         status: Current status of podcast generation
@@ -69,6 +70,12 @@ class Podcast(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
+    )
+
+    title = Column(
+        String(500),
+        nullable=True,
+        comment="AI-generated title for the podcast",
     )
 
     script = Column(
@@ -152,6 +159,7 @@ class Podcast(Base):
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
+            "title": self.title,
             "script": self.script,
             "audio_url": self.audio_url,
             "status": self.status.value,

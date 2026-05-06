@@ -48,9 +48,9 @@ class ToneType(str, Enum):
 
 class LengthType(str, Enum):
     """Podcast length types."""
-    SHORT = "short"      # ~5 minutes, ~750 words
-    MEDIUM = "medium"    # ~10 minutes, ~1500 words
-    LONG = "long"        # ~15 minutes, ~2250 words
+    SHORT = "short"      # ~5 minutes, ~1000 words
+    MEDIUM = "medium"    # ~10 minutes, ~2000 words
+    LONG = "long"        # ~15 minutes, ~3000 words
 
 
 class SpeakerType(str, Enum):
@@ -121,6 +121,7 @@ class PodcastScript(BaseModel):
     Complete podcast script with metadata.
 
     Attributes:
+        title: News-style headline summarizing the episode
         segments: List of script segments in order
         total_word_count: Total words in script
         estimated_duration_seconds: Estimated audio duration
@@ -131,6 +132,7 @@ class PodcastScript(BaseModel):
         generation_metadata: Additional metadata about generation
         created_at: Script creation timestamp
     """
+    title: str = Field(..., max_length=100, description="News-style headline for the episode")
     segments: List[ScriptSegment] = Field(..., min_items=1, description="Script segments")
     total_word_count: int = Field(..., ge=0, description="Total word count")
     estimated_duration_seconds: int = Field(..., ge=0, description="Estimated duration in seconds")
@@ -631,9 +633,9 @@ Focus on the most interesting angles, surprising facts, and different perspectiv
         total_text = " ".join(s.text for s in segments)
         word_count = len(total_text.split())
 
-        # Estimate duration: average speaking rate is ~150 words per minute
+        # Estimate duration: average speaking rate is ~200 words per minute
         # Add time for pauses
-        words_per_minute = 150
+        words_per_minute = 200
         pause_time = sum(2 for s in segments if s.pause_after)  # 2 seconds per pause
         duration_seconds = int((word_count / words_per_minute * 60) + pause_time)
 
@@ -819,7 +821,7 @@ def parse_script_text(
 
     # Calculate metadata
     total_words = sum(len(segment.text.split()) for segment in segments)
-    estimated_duration = int(total_words / 2.5 * 60)  # Assume 150 WPM
+    estimated_duration = int(total_words / 200 * 60)  # Assume 200 WPM
 
     # Map tone and length to enums
     try:

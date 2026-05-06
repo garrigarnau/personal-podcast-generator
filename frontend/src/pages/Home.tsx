@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { Settings, LogOut, Play, Pause, Download } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Settings, LogOut, Play, Pause, Download, Newspaper, Headphones } from 'lucide-react';
 import { authService } from '../services/auth';
 import PreferencesModal from '../components/PreferencesModal';
 import GeneratePodcastSection from '../components/GeneratePodcastSection';
 import ScheduleSettings from '../components/ScheduleSettings';
 import ScriptViewer from '../components/ScriptViewer';
 import AudioPlayer from '../components/AudioPlayer';
+import SourcesModal from '../components/SourcesModal';
 import { PodcastPreferences, Podcast } from '../types/podcast';
 import {
   getPodcasts,
@@ -64,6 +65,9 @@ export const Home: React.FC = () => {
   const [audioBlobUrls, setAudioBlobUrls] = useState<Map<string, string>>(new Map());
   const [loadingAudioId, setLoadingAudioId] = useState<string | null>(null);
 
+  // Sources modal state
+  const [sourcesModalPodcastId, setSourcesModalPodcastId] = useState<string | null>(null);
+
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
 
@@ -101,6 +105,10 @@ export const Home: React.FC = () => {
                         prefs.duration_minutes <= 15 ? 'medium' : 'long';
           setPreferences(prev => ({ ...prev, length }));
         }
+
+        if (prefs.tone) {
+          setPreferences(prev => ({ ...prev, tone: prefs.tone }));
+        }
       }
 
       // Load schedule settings
@@ -119,9 +127,11 @@ export const Home: React.FC = () => {
 
       const response = await getPodcasts();
       // Parse metadata for each podcast
-      const parsedPodcasts = (response.podcasts || []).map((podcast: Podcast) => {
+      const parsedPodcasts = (response.podcasts || []).map((podcast: any) => {
         try {
-          const metadata = podcast.metadata ? JSON.parse(podcast.metadata) : {};
+          // Check both 'metadata' and 'podcast_metadata' field names (API might return either)
+          const metadataString = podcast.metadata || podcast.podcast_metadata;
+          const metadata = metadataString ? JSON.parse(metadataString) : {};
           return {
             ...podcast,
             interests: metadata.interests || [],
@@ -130,6 +140,7 @@ export const Home: React.FC = () => {
             parsedMetadata: metadata, // Include full parsed metadata
           };
         } catch (e) {
+          console.error('Failed to parse podcast metadata:', e);
           return podcast;
         }
       });
@@ -157,6 +168,7 @@ export const Home: React.FC = () => {
       await updateUserPreferences({
         interests,
         duration_minutes: durationMinutes,
+        tone: preferences.tone,
       });
 
       console.log('Preferences saved successfully');
@@ -199,10 +211,11 @@ export const Home: React.FC = () => {
           setPodcasts(prev => {
             const existingIndex = prev.findIndex(p => p.id === statusUpdate.id);
 
-            // Parse metadata if available
+            // Parse metadata if available (check both field names)
             let parsedMetadata;
             try {
-              parsedMetadata = statusUpdate.metadata ? JSON.parse(statusUpdate.metadata) : undefined;
+              const metadataString = (statusUpdate as any).metadata || (statusUpdate as any).podcast_metadata;
+              parsedMetadata = metadataString ? JSON.parse(metadataString) : undefined;
             } catch (e) {
               console.error('Failed to parse metadata:', e);
             }
@@ -210,6 +223,7 @@ export const Home: React.FC = () => {
             const updatedPodcast: Podcast = {
               id: statusUpdate.id,
               user_id: '',
+              title: statusUpdate.title,
               status: statusUpdate.status,
               audio_url: statusUpdate.audio_url,
               script: statusUpdate.script,
@@ -337,17 +351,6 @@ export const Home: React.FC = () => {
                 <Settings size={20} />
                 <span>Preferences</span>
               </button>
-              <Link
-                to="/admin"
-                className="
-                  flex items-center gap-2 px-4 py-2 rounded-lg
-                  bg-gray-100 hover:bg-gray-200 text-gray-700
-                  transition-colors duration-200
-                "
-              >
-                <Settings size={20} />
-                <span>Admin</span>
-              </Link>
               <button
                 onClick={handleLogout}
                 className="
@@ -405,7 +408,7 @@ export const Home: React.FC = () => {
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4 flex-1">
-                          {/* Play/Pause Button */}
+                          {/* Open Player Button */}
                           {podcast.status === 'completed' && podcast.audio_url ? (
                             <button
                               onClick={() => togglePlay(podcast.id)}
@@ -415,13 +418,12 @@ export const Home: React.FC = () => {
                                 bg-blue-600 hover:bg-blue-700 text-white rounded-full
                                 transition-colors disabled:opacity-50 disabled:cursor-not-allowed
                               "
+                              title={playingPodcastId === podcast.id ? "Close player" : "Open player"}
                             >
                               {loadingAudioId === podcast.id ? (
                                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-                              ) : playingPodcastId === podcast.id ? (
-                                <Pause size={20} />
                               ) : (
-                                <Play size={20} className="ml-1" />
+                                <Headphones size={20} />
                               )}
                             </button>
                           ) : (
@@ -435,13 +437,15 @@ export const Home: React.FC = () => {
                           {/* Podcast Info */}
                           <div className="flex-1">
                             <h3 className="font-medium text-gray-900">
-                              {podcast.interests && podcast.interests.length > 0 ? (
-                                <>
-                                  {podcast.interests.slice(0, 3).join(', ')}
-                                  {podcast.interests.length > 3 && ` +${podcast.interests.length - 3} more`}
-                                </>
-                              ) : (
-                                'Podcast'
+                              {podcast.title || (
+                                podcast.interests && podcast.interests.length > 0 ? (
+                                  <>
+                                    {podcast.interests.slice(0, 3).join(', ')}
+                                    {podcast.interests.length > 3 && ` +${podcast.interests.length - 3} more`}
+                                  </>
+                                ) : (
+                                  'Podcast'
+                                )
                               )}
                             </h3>
                             <div className="flex items-center gap-4 mt-1 text-sm text-gray-600">
@@ -469,29 +473,56 @@ export const Home: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Download Button */}
+                        {/* Sources Button */}
                         {podcast.status === 'completed' && (
                           <button
-                            onClick={() => handleDownload(podcast.id)}
+                            onClick={() => {
+                              console.log('Podcast data:', podcast);
+                              console.log('Parsed metadata:', podcast.parsedMetadata);
+                              console.log('Articles:', podcast.parsedMetadata?.articles);
+                              setSourcesModalPodcastId(podcast.id);
+                            }}
                             className="
-                              p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50
+                              p-2 text-gray-600 hover:text-purple-600 hover:bg-purple-50
                               rounded-lg transition-colors
                             "
-                            title="Download"
+                            title="View Sources"
                           >
-                            <Download size={20} />
+                            <Newspaper size={20} />
                           </button>
                         )}
                       </div>
 
-                      {/* Audio Player (for currently playing) */}
-                      {playingPodcastId === podcast.id && podcast.audio_url && audioBlobUrls.has(podcast.id) && (
+                      {/* Audio Player Preview - Always visible for completed podcasts */}
+                      {podcast.status === 'completed' && podcast.audio_url && (
                         <div className="mt-4 pt-4 border-t border-gray-200">
-                          <AudioPlayer
-                            audioUrl={audioBlobUrls.get(podcast.id)!}
-                            title={`Podcast - ${new Date(podcast.created_at).toLocaleDateString()}`}
-                            onDownload={() => handleDownload(podcast.id)}
-                          />
+                          {audioBlobUrls.has(podcast.id) ? (
+                            <AudioPlayer
+                              audioUrl={audioBlobUrls.get(podcast.id)!}
+                              title={`Podcast - ${new Date(podcast.created_at).toLocaleDateString()}`}
+                              onDownload={() => handleDownload(podcast.id)}
+                            />
+                          ) : (
+                            <div className="flex items-center justify-center py-8 bg-gray-50 rounded-lg">
+                              <button
+                                onClick={() => togglePlay(podcast.id)}
+                                disabled={loadingAudioId === podcast.id}
+                                className="flex items-center gap-3 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50"
+                              >
+                                {loadingAudioId === podcast.id ? (
+                                  <>
+                                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                                    <span>Loading audio...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play size={20} />
+                                    <span>Load Audio Player</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -500,7 +531,6 @@ export const Home: React.FC = () => {
                         <div className="mt-4">
                           <ScriptViewer
                             script={podcast.script}
-                            articles={podcast.parsedMetadata?.articles}
                           />
                         </div>
                       )}
@@ -552,6 +582,17 @@ export const Home: React.FC = () => {
         onInterestsChange={setInterests}
         onPreferencesChange={setPreferences}
         onSave={handleSavePreferences}
+      />
+
+      {/* Sources Modal */}
+      <SourcesModal
+        isOpen={sourcesModalPodcastId !== null}
+        onClose={() => setSourcesModalPodcastId(null)}
+        articles={
+          sourcesModalPodcastId
+            ? podcasts.find(p => p.id === sourcesModalPodcastId)?.parsedMetadata?.articles || []
+            : []
+        }
       />
     </div>
   );

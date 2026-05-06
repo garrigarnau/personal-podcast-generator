@@ -130,6 +130,15 @@ export const HealthMonitor: React.FC<HealthMonitorProps> = ({
                   Duration
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Firecrawl
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Resources
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Cost Breakdown
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Created
                 </th>
               </tr>
@@ -168,6 +177,63 @@ export const HealthMonitor: React.FC<HealthMonitorProps> = ({
                   <td className="px-4 py-4 whitespace-nowrap">
                     <div className="text-sm text-gray-900">
                       {formatDuration(task.duration)}
+                    </div>
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap">
+                    <div className="text-xs text-gray-600 space-y-0.5">
+                      {task.firecrawlSearches !== undefined && (
+                        <div>Search: {task.firecrawlSearches}</div>
+                      )}
+                      {task.firecrawlScrapes !== undefined && (
+                        <div>Scrape: {task.firecrawlScrapes}</div>
+                      )}
+                      {task.firecrawlSearches === undefined && task.firecrawlScrapes === undefined && (
+                        <div className="text-gray-400">N/A</div>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap">
+                    <div className="text-xs text-gray-600 space-y-0.5">
+                      {task.tokensUsed !== undefined && (
+                        <div title="OpenAI Tokens">Tokens: {task.tokensUsed.toLocaleString()}</div>
+                      )}
+                      {task.elevenlabsChars !== undefined && (
+                        <div title="ElevenLabs Characters">Chars: {task.elevenlabsChars.toLocaleString()}</div>
+                      )}
+                      {task.tokensUsed === undefined && task.elevenlabsChars === undefined && (
+                        <div className="text-gray-400">N/A</div>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-4 whitespace-nowrap">
+                    <div className="text-xs text-gray-600 space-y-0.5">
+                      {task.openaiCost !== undefined && task.openaiCost > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">OpenAI:</span>
+                          <span className="font-medium text-blue-600">${task.openaiCost.toFixed(3)}</span>
+                        </div>
+                      )}
+                      {task.elevenlabsCost !== undefined && task.elevenlabsCost > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">ElevenLabs:</span>
+                          <span className="font-medium text-purple-600">${task.elevenlabsCost.toFixed(3)}</span>
+                        </div>
+                      )}
+                      {task.firecrawlCost !== undefined && task.firecrawlCost > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Firecrawl:</span>
+                          <span className="font-medium text-orange-600">${task.firecrawlCost.toFixed(3)}</span>
+                        </div>
+                      )}
+                      {task.totalCost !== undefined && task.totalCost > 0 && (
+                        <div className="flex justify-between pt-0.5 border-t border-gray-200">
+                          <span className="text-gray-700 font-medium">Total:</span>
+                          <span className="font-semibold text-gray-900">${task.totalCost.toFixed(3)}</span>
+                        </div>
+                      )}
+                      {(!task.openaiCost && !task.elevenlabsCost && !task.firecrawlCost && !task.totalCost) && (
+                        <div className="text-gray-400">N/A</div>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-4 whitespace-nowrap">

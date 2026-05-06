@@ -294,6 +294,11 @@ async def update_user_preferences(
         updated = True
         logger.debug(f"Updated duration for user_id={user.id}")
 
+    if request.tone is not None:
+        user.preferences["tone"] = request.tone
+        updated = True
+        logger.debug(f"Updated tone for user_id={user.id}")
+
     if request.voice_settings is not None:
         user.preferences["voice_settings"] = request.voice_settings
         updated = True

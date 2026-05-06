@@ -135,6 +135,7 @@ class PodcastResponse(BaseModel):
     Attributes:
         id: Unique podcast identifier
         user_id: User who owns this podcast
+        title: AI-generated title for the podcast
         status: Current generation status
         audio_url: URL to generated audio (null if not completed)
         script: Generated podcast script (null if not completed)
@@ -146,11 +147,17 @@ class PodcastResponse(BaseModel):
 
     id: UUID = Field(..., description="Unique podcast identifier")
     user_id: UUID = Field(..., description="User identifier")
+    title: Optional[str] = Field(None, description="AI-generated podcast title")
     status: str = Field(..., description="Generation status", examples=["pending"])
     audio_url: Optional[str] = Field(None, description="Audio file URL")
     script: Optional[str] = Field(None, description="Generated podcast script")
     error_message: Optional[str] = Field(None, description="Error details if failed")
-    metadata: Optional[str] = Field(None, description="Additional metadata (JSON)", alias="podcast_metadata")
+    metadata: Optional[str] = Field(
+        None,
+        description="Additional metadata (JSON)",
+        alias="podcast_metadata",
+        serialization_alias="metadata"
+    )
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
 
@@ -179,6 +186,7 @@ class PodcastStatusResponse(BaseModel):
 
     Attributes:
         id: Podcast identifier
+        title: AI-generated title (available after script generation)
         status: Current generation status
         audio_url: Audio URL if completed
         script: Generated script (available before audio)
@@ -188,6 +196,7 @@ class PodcastStatusResponse(BaseModel):
     """
 
     id: UUID = Field(..., description="Podcast identifier")
+    title: Optional[str] = Field(None, description="AI-generated podcast title")
     status: str = Field(..., description="Generation status")
     audio_url: Optional[str] = Field(None, description="Audio URL if completed")
     script: Optional[str] = Field(None, description="Generated podcast script")

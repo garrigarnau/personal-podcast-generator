@@ -8,6 +8,7 @@ This module provides endpoints for:
 - Listing user podcasts with pagination
 """
 
+import json
 import logging
 from typing import Optional
 from uuid import UUID
@@ -168,7 +169,7 @@ async def generate_podcast(
     podcast = Podcast(
         user_id=current_user.id,
         status=PodcastStatus.PENDING,
-        podcast_metadata=str({
+        podcast_metadata=json.dumps({
             "interests": request.interests,
             "tone": request.tone,
             "length": request.length,
@@ -257,7 +258,7 @@ async def generate_audio_from_script(
     podcast = Podcast(
         user_id=current_user.id,
         status=PodcastStatus.PENDING,
-        podcast_metadata=str({
+        podcast_metadata=json.dumps({
             "source": "manual_script",
             "tone": request.tone,
             "length": request.length,
@@ -532,6 +533,7 @@ async def get_podcast_status(
 
     return PodcastStatusResponse(
         id=podcast.id,
+        title=podcast.title,
         status=podcast.status.value,
         audio_url=podcast.audio_url,
         script=podcast.script,
@@ -637,11 +639,16 @@ async def list_podcasts(
         f"total={total}, page={page}/{total_pages}"
     )
 
+    # Debug logging for metadata
+    for p in podcasts:
+        logger.debug(f"Podcast {p.id}: metadata={p.podcast_metadata[:100] if p.podcast_metadata else 'None'}")
+
     return PodcastListResponse(
         podcasts=[
             PodcastResponse(
                 id=p.id,
                 user_id=p.user_id,
+                title=p.title,
                 status=p.status.value,
                 audio_url=p.audio_url,
                 script=p.script,

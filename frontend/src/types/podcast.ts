@@ -28,11 +28,13 @@ export interface PodcastMetadata {
 export interface Podcast {
   id: string;
   user_id: string;
+  title?: string;
   status: PodcastStatus;
   audio_url?: string;
   script?: string;
   error_message?: string;
   metadata?: string; // JSON string
+  podcast_metadata?: string; // JSON string (backend alias)
   created_at: string;
   updated_at: string;
   // Parsed from metadata
@@ -60,10 +62,12 @@ export interface GeneratePodcastResponse {
 
 export interface PodcastStatusResponse {
   id: string;
+  title?: string;
   status: PodcastStatus;
   audio_url?: string;
   script?: string;
   error_message?: string;
   progress?: number;
   metadata?: string;
+  podcast_metadata?: string; // Backend alias
 }

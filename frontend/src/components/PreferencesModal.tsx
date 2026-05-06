@@ -1,5 +1,5 @@
-import React from 'react';
-import { X } from 'lucide-react';
+import React, { useState } from 'react';
+import { X, Info, Sparkles } from 'lucide-react';
 import InterestSelector from './InterestSelector';
 import CustomizationPanel from './CustomizationPanel';
 import { PodcastPreferences } from '../types/podcast';
@@ -23,12 +23,42 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({
   onPreferencesChange,
   onSave,
 }) => {
+  const [showTooltip, setShowTooltip] = useState(false);
+
   if (!isOpen) return null;
 
   const handleSave = () => {
     onSave();
     onClose();
   };
+
+  // Mock recommended interests based on current selections
+  const getRecommendedInterests = () => {
+    const recommendations: { [key: string]: string[] } = {
+      'technology': ['artificial intelligence', 'cybersecurity', 'blockchain', 'cloud computing'],
+      'sports': ['fitness', 'nutrition', 'athletics', 'sports psychology'],
+      'politics': ['international relations', 'economics', 'public policy', 'geopolitics'],
+      'science': ['astronomy', 'biology', 'physics', 'environmental science'],
+      'business': ['entrepreneurship', 'startups', 'finance', 'marketing'],
+      'health': ['mental health', 'wellness', 'nutrition', 'medical research'],
+    };
+
+    const recommended = new Set<string>();
+    interests.forEach(interest => {
+      const key = interest.toLowerCase();
+      if (recommendations[key]) {
+        recommendations[key].forEach(rec => {
+          if (!interests.includes(rec)) {
+            recommended.add(rec);
+          }
+        });
+      }
+    });
+
+    return Array.from(recommended).slice(0, 4);
+  };
+
+  const recommendedInterests = interests.length > 0 ? getRecommendedInterests() : [];
 
   return (
     <>
@@ -68,6 +98,65 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   onChange={onInterestsChange}
                 />
               </div>
+
+              {/* AI Recommendations */}
+              {recommendedInterests.length > 0 && (
+                <div className="pt-4 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="text-purple-600" size={20} />
+                      <h3 className="text-lg font-semibold text-gray-900">
+                        Recommended For You
+                      </h3>
+                    </div>
+                    <div className="relative">
+                      <button
+                        onMouseEnter={() => setShowTooltip(true)}
+                        onMouseLeave={() => setShowTooltip(false)}
+                        className="p-1 rounded-full hover:bg-gray-100 transition-colors"
+                      >
+                        <Info size={18} className="text-gray-500" />
+                      </button>
+                      {showTooltip && (
+                        <div className="absolute right-0 top-8 w-80 z-50 bg-gray-900 text-white text-xs rounded-lg p-4 shadow-xl">
+                          <div className="space-y-2">
+                            <p className="font-semibold text-sm">How it works:</p>
+                            <p>
+                              In production, this would use:
+                            </p>
+                            <ul className="list-disc list-inside space-y-1 ml-2">
+                              <li><strong>K-Means Clustering:</strong> Group similar user preferences</li>
+                              <li><strong>Collaborative Filtering:</strong> Find users with similar interests</li>
+                              <li><strong>Content-Based Filtering:</strong> Analyze topic relationships using embeddings (Word2Vec/BERT)</li>
+                              <li><strong>Matrix Factorization:</strong> Decompose user-interest interactions</li>
+                              <li><strong>Neural Networks:</strong> Deep learning models for personalized recommendations</li>
+                            </ul>
+                            <p className="pt-2 border-t border-gray-700">
+                              This mockup uses simple rule-based suggestions.
+                            </p>
+                          </div>
+                          <div className="absolute -top-2 right-4 w-4 h-4 bg-gray-900 transform rotate-45"></div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-gray-600 mb-4 text-sm">
+                    Based on your interests, you might also like:
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {recommendedInterests.map((interest) => (
+                      <button
+                        key={interest}
+                        onClick={() => onInterestsChange([...interests, interest])}
+                        className="px-4 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-full text-sm font-medium transition-colors border border-purple-200 hover:border-purple-300 flex items-center gap-2"
+                      >
+                        <span>+</span>
+                        <span>{interest}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Customization */}
               <div className="pt-4 border-t border-gray-200">

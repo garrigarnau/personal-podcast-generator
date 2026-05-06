@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, cast, Date
+from sqlalchemy import select, func, and_, cast, Date, Integer
 
 from app.core.database import get_session
 from app.models.podcast import Podcast, PodcastStatus
@@ -93,17 +93,55 @@ async def get_admin_stats(
     metrics_aggregate = await session.execute(
         select(
             func.avg(Metrics.latency_ms).label("avg_latency"),
+            func.avg(Metrics.news_fetch_ms).label("avg_news_fetch"),
+            func.avg(Metrics.script_generation_ms).label("avg_script_generation"),
+            func.avg(Metrics.audio_generation_ms).label("avg_audio_generation"),
             func.sum(Metrics.cost_estimate).label("total_cost"),
             func.sum(Metrics.tokens_used).label("total_tokens"),
             func.sum(Metrics.elevenlabs_characters).label("total_characters"),
+            func.sum(func.coalesce(Metrics.firecrawl_scrapes, 0)).label("total_firecrawl_scrapes"),
+            func.sum(func.coalesce(Metrics.firecrawl_cost, 0.0)).label("total_firecrawl_cost"),
+            func.sum(func.coalesce(Metrics.openai_cost, 0.0)).label("total_openai_cost"),
+            func.sum(func.coalesce(Metrics.elevenlabs_cost, 0.0)).label("total_elevenlabs_cost"),
         )
     )
     metrics_data = metrics_aggregate.one_or_none()
 
     avg_latency_ms = float(metrics_data.avg_latency or 0)
+    avg_news_fetch_ms = float(metrics_data.avg_news_fetch or 0)
+    avg_script_generation_ms = float(metrics_data.avg_script_generation or 0)
+    avg_audio_generation_ms = float(metrics_data.avg_audio_generation or 0)
     total_cost_usd = float(metrics_data.total_cost or 0)
     total_tokens = int(metrics_data.total_tokens or 0)
     total_characters = int(metrics_data.total_characters or 0)
+    total_firecrawl_scrapes = int(metrics_data.total_firecrawl_scrapes or 0)
+    total_firecrawl_cost = float(metrics_data.total_firecrawl_cost or 0)
+    total_openai_cost = float(metrics_data.total_openai_cost or 0)
+    total_elevenlabs_cost = float(metrics_data.total_elevenlabs_cost or 0)
+
+    # Use actual tracked costs from database
+    # Fall back to calculation only if no actual costs are tracked (backward compatibility)
+    openai_cost = total_openai_cost if total_openai_cost > 0 else (total_tokens / 1000) * 0.03 if total_tokens > 0 else 0.0
+    elevenlabs_cost = total_elevenlabs_cost if total_elevenlabs_cost > 0 else (total_characters / 1000) * 0.30 if total_characters > 0 else 0.0
+    firecrawl_cost = total_firecrawl_cost
+
+    cost_breakdown = {
+        "openai": round(openai_cost, 4),
+        "elevenlabs": round(elevenlabs_cost, 4),
+        "firecrawl": round(firecrawl_cost, 4),
+    }
+
+    # Ensure total_cost_usd matches the breakdown sum
+    # This prevents mismatches from rounding or old records
+    breakdown_total = openai_cost + elevenlabs_cost + firecrawl_cost
+    total_cost_usd = round(breakdown_total, 4)
+
+    # Latency breakdown by service
+    latency_breakdown = {
+        "news_fetch": round(avg_news_fetch_ms, 2),
+        "script_generation": round(avg_script_generation_ms, 2),
+        "audio_generation": round(avg_audio_generation_ms, 2),
+    }
 
     kpis = KPISummary(
         total_podcasts=total_podcasts,
@@ -112,6 +150,12 @@ async def get_admin_stats(
         success_rate=round(success_rate, 2),
         total_tokens=total_tokens,
         total_characters=total_characters,
+        total_firecrawl_scrapes=total_firecrawl_scrapes,
+        total_firecrawl_cost=total_firecrawl_cost,
+        total_openai_cost=openai_cost,
+        total_elevenlabs_cost=elevenlabs_cost,
+        cost_breakdown=cost_breakdown,
+        latency_breakdown=latency_breakdown,
     )
 
     logger.info(
@@ -128,15 +172,15 @@ async def get_admin_stats(
             cast(Podcast.created_at, Date).label("date"),
             func.count().label("total"),
             func.sum(
-                cast((Podcast.status == PodcastStatus.COMPLETED), func.Integer)
+                cast((Podcast.status == PodcastStatus.COMPLETED), Integer)
             ).label("completed"),
             func.sum(
-                cast((Podcast.status == PodcastStatus.FAILED), func.Integer)
+                cast((Podcast.status == PodcastStatus.FAILED), Integer)
             ).label("failed"),
             func.sum(
                 cast(
                     (Podcast.status.in_([PodcastStatus.PENDING, PodcastStatus.PROCESSING])),
-                    func.Integer
+                    Integer
                 )
             ).label("pending"),
         )
@@ -170,7 +214,7 @@ async def get_admin_stats(
 
         volume_data.append(
             DailyVolumeData(
-                date=row.date,
+                day=row.date,
                 total=row.total or 0,
                 completed=row.completed or 0,
                 failed=row.failed or 0,
@@ -206,6 +250,13 @@ async def get_admin_stats(
             latency_ms=metrics_map[p.id].latency_ms if p.id in metrics_map else None,
             cost_usd=metrics_map[p.id].cost_estimate if p.id in metrics_map else None,
             error_message=p.error_message,
+            firecrawl_searches=metrics_map[p.id].firecrawl_searches if p.id in metrics_map else None,
+            firecrawl_scrapes=metrics_map[p.id].firecrawl_scrapes if p.id in metrics_map else None,
+            firecrawl_cost=metrics_map[p.id].firecrawl_cost if p.id in metrics_map else None,
+            tokens_used=metrics_map[p.id].tokens_used if p.id in metrics_map else None,
+            elevenlabs_characters=metrics_map[p.id].elevenlabs_characters if p.id in metrics_map else None,
+            openai_cost=metrics_map[p.id].openai_cost if p.id in metrics_map else None,
+            elevenlabs_cost=metrics_map[p.id].elevenlabs_cost if p.id in metrics_map else None,
         )
         for p in recent_podcasts_list
     ]
@@ -320,6 +371,13 @@ async def get_recent_podcasts(
             latency_ms=metrics_map[p.id].latency_ms if p.id in metrics_map else None,
             cost_usd=metrics_map[p.id].cost_estimate if p.id in metrics_map else None,
             error_message=p.error_message,
+            firecrawl_searches=metrics_map[p.id].firecrawl_searches if p.id in metrics_map else None,
+            firecrawl_scrapes=metrics_map[p.id].firecrawl_scrapes if p.id in metrics_map else None,
+            firecrawl_cost=metrics_map[p.id].firecrawl_cost if p.id in metrics_map else None,
+            tokens_used=metrics_map[p.id].tokens_used if p.id in metrics_map else None,
+            elevenlabs_characters=metrics_map[p.id].elevenlabs_characters if p.id in metrics_map else None,
+            openai_cost=metrics_map[p.id].openai_cost if p.id in metrics_map else None,
+            elevenlabs_cost=metrics_map[p.id].elevenlabs_cost if p.id in metrics_map else None,
         )
         for p in podcasts_list
     ]
@@ -385,15 +443,15 @@ async def get_daily_metrics(
             cast(Podcast.created_at, Date).label("date"),
             func.count().label("total"),
             func.sum(
-                cast((Podcast.status == PodcastStatus.COMPLETED), func.Integer)
+                cast((Podcast.status == PodcastStatus.COMPLETED), Integer)
             ).label("completed"),
             func.sum(
-                cast((Podcast.status == PodcastStatus.FAILED), func.Integer)
+                cast((Podcast.status == PodcastStatus.FAILED), Integer)
             ).label("failed"),
             func.sum(
                 cast(
                     (Podcast.status.in_([PodcastStatus.PENDING, PodcastStatus.PROCESSING])),
-                    func.Integer
+                    Integer
                 )
             ).label("pending"),
         )
@@ -430,7 +488,7 @@ async def get_daily_metrics(
 
         metrics.append(
             DailyVolumeData(
-                date=row.date,
+                day=row.date,
                 total=row.total or 0,
                 completed=row.completed or 0,
                 failed=row.failed or 0,

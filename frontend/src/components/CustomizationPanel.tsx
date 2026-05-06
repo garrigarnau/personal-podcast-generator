@@ -9,9 +9,9 @@ interface CustomizationPanelProps {
 }
 
 const LENGTH_OPTIONS: { value: PodcastLength; label: string; duration: string; description: string }[] = [
-  { value: 'short', label: 'Short', duration: '~5 min', description: 'Quick overview' },
-  { value: 'medium', label: 'Medium', duration: '~10 min', description: 'Balanced coverage' },
-  { value: 'long', label: 'Long', duration: '~15 min', description: 'Deep dive' },
+  { value: 'short', label: 'Short', duration: '~3 min', description: 'Quick overview' },
+  { value: 'medium', label: 'Medium', duration: '~5 min', description: 'Balanced coverage' },
+  { value: 'long', label: 'Long', duration: '~8 min', description: 'Deep dive' },
 ];
 
 const TONE_OPTIONS: { value: PodcastTone; label: string; description: string }[] = [

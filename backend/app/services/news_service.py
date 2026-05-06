@@ -12,12 +12,13 @@ This module provides production-grade news fetching capabilities with:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from collections import Counter
 import re
 from urllib.parse import urlparse
 
+import httpx
 from pydantic import BaseModel, Field, HttpUrl, validator
 from firecrawl import FirecrawlApp
 from app.core.config import settings
@@ -87,8 +88,8 @@ class FetchedNewsArticle(BaseModel):
                 return datetime.fromisoformat(v.replace('Z', '+00:00'))
             except ValueError:
                 logger.warning(f"Could not parse date: {v}, using current time")
-                return datetime.utcnow()
-        return datetime.utcnow()
+                return datetime.now(timezone.utc)
+        return datetime.now(timezone.utc)
 
     class Config:
         json_encoders = {
@@ -134,6 +135,33 @@ class FirecrawlNewsService:
     SEARCH_COST_PER_REQUEST = 0.01  # USD
     SCRAPE_COST_PER_PAGE = 0.005    # USD
 
+    # News API category mapping
+    INTEREST_TO_CATEGORY = {
+        "artificial intelligence": "technology",
+        "ai": "technology",
+        "tech": "technology",
+        "technology": "technology",
+        "machine learning": "technology",
+        "startups": "business",
+        "business": "business",
+        "finance": "business",
+        "stocks": "business",
+        "economy": "business",
+        "health": "health",
+        "medicine": "health",
+        "healthcare": "health",
+        "sports": "sports",
+        "football": "sports",
+        "basketball": "sports",
+        "soccer": "sports",
+        "entertainment": "entertainment",
+        "movies": "entertainment",
+        "music": "entertainment",
+        "science": "science",
+        "space": "science",
+        "physics": "science",
+    }
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -160,8 +188,16 @@ class FirecrawlNewsService:
             logger.error(f"Failed to initialize Firecrawl client: {e}")
             raise FirecrawlNewsServiceError(f"Initialization failed: {e}")
 
+        # Initialize httpx client for News API
+        self.http_client = httpx.AsyncClient(timeout=timeout)
+        self.news_api_key = settings.NEWS_API_KEY
+        logger.info(f"News API configured: {bool(self.news_api_key)}")
+
         # Cost tracking
         self._total_requests = 0
+        self._total_searches = 0
+        self._total_scrapes = 0
+        self._news_api_requests = 0
         self._total_cost = 0.0
         self._request_timestamps: List[datetime] = []
 
@@ -172,98 +208,152 @@ class FirecrawlNewsService:
         days_back: int = 7
     ) -> List[Dict[str, Any]]:
         """
-        PHASE 1: Search for news article candidates without scraping full content.
+        PHASE 1: Search for news article candidates using News API.
 
-        Uses Firecrawl search WITHOUT scrapeOptions to save credits.
+        NEW STRATEGY: Searches for 3 articles per interest individually to guarantee topic coverage.
+        This ensures balanced representation across all user interests rather than biasing toward
+        the most popular topics.
+
+        Uses News API /v2/top-headlines endpoint for recent news.
         Returns metadata only (title, description, url, source, date, position).
 
         Args:
             interests: List of user interest keywords/topics
-            limit: Maximum number of candidates to return
+            limit: IGNORED - now fetches 3 articles per interest (total = num_interests × 3)
             days_back: Only include articles from last N days
 
         Returns:
-            List of dicts with: title, description, url, source, date, position
+            List of dicts with: title, description, url, source, date, position, interest
         """
         if not interests:
             logger.warning("No interests provided, returning empty results")
             return []
 
-        logger.info(f"Searching news candidates: interests={interests}, limit={limit}, days_back={days_back}")
+        if not self.news_api_key:
+            logger.error("NEWS_API_KEY not configured")
+            raise FirecrawlNewsServiceError("NEWS_API_KEY not configured")
+
+        articles_per_interest = 3
+        logger.info(f"Searching news candidates via News API: interests={interests}, {articles_per_interest} articles per interest, days_back={days_back}")
 
         try:
-            await self._check_rate_limit()
+            all_candidates = []
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-            query = self._build_search_query(interests)
-            logger.debug(f"Search query: {query}")
+            # Loop through each interest and search individually
+            for interest in interests:
+                logger.info(f"Searching News API for interest: {interest}")
 
-            for attempt in range(self.max_retries):
                 try:
-                    result = await asyncio.to_thread(
-                        self._execute_search_candidates,
-                        query,
-                        limit
-                    )
-                    self._track_request(cost=self.SEARCH_COST_PER_REQUEST)
+                    # Map interest to News API category if available
+                    category = self.INTEREST_TO_CATEGORY.get(interest.lower())
 
-                    if not result:
-                        logger.warning("No candidates found from search")
-                        return []
+                    # Build News API request params
+                    params = {
+                        'country': 'us',
+                        'q': interest,
+                        'pageSize': articles_per_interest,
+                        'apiKey': self.news_api_key
+                    }
 
-                    logger.info(f"Found {len(result)} candidates")
+                    # Add category if mapped
+                    if category:
+                        params['category'] = category
+                        logger.debug(f"Mapped interest '{interest}' to category '{category}'")
 
-                    # Filter by date and extract metadata
-                    candidates = []
-                    cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+                    logger.debug(f"News API request params: {params}")
 
-                    for item in result:
+                    # Call News API with retry logic
+                    result = None
+                    for attempt in range(self.max_retries):
                         try:
-                            data = item.model_dump() if hasattr(item, 'model_dump') else item
+                            response = await self.http_client.get(
+                                'https://newsapi.org/v2/top-headlines',
+                                params=params
+                            )
+                            response.raise_for_status()
+                            result = response.json()
 
-                            pub_date = self._extract_date(data) or datetime.utcnow()
+                            # Track News API request
+                            self._news_api_requests += 1
+                            logger.info(f"News API request successful (total: {self._news_api_requests})")
+                            break  # Success, exit retry loop
+
+                        except httpx.HTTPStatusError as e:
+                            logger.warning(f"News API HTTP error (attempt {attempt + 1}/{self.max_retries}): {e.response.status_code} - {e.response.text}")
+                            if attempt < self.max_retries - 1:
+                                await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                            else:
+                                logger.error(f"All retry attempts failed for interest '{interest}'")
+                                result = None
+                                break
+                        except Exception as e:
+                            logger.warning(f"News API request failed (attempt {attempt + 1}/{self.max_retries}): {e}")
+                            if attempt < self.max_retries - 1:
+                                await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+                            else:
+                                logger.error(f"All retry attempts failed for interest '{interest}'")
+                                result = None
+                                break
+
+                    if not result or result.get('status') != 'ok':
+                        logger.warning(f"No valid response from News API for interest: {interest}")
+                        continue
+
+                    articles = result.get('articles', [])
+                    logger.info(f"Found {len(articles)} articles for interest: {interest}")
+
+                    # Parse and filter articles
+                    interest_candidates = []
+                    for article in articles:
+                        try:
+                            # Parse publication date
+                            pub_date_str = article.get('publishedAt')
+                            if pub_date_str:
+                                try:
+                                    pub_date = datetime.fromisoformat(pub_date_str.replace('Z', '+00:00'))
+                                except (ValueError, AttributeError):
+                                    pub_date = datetime.now(timezone.utc)
+                            else:
+                                pub_date = datetime.now(timezone.utc)
+
+                            # Filter by date
                             if pub_date < cutoff_date:
                                 continue
 
-                            # Extract domain from URL for source
-                            url_str = str(data.get('url', ''))
-                            parsed_url = urlparse(url_str) if url_str else None
-                            domain = parsed_url.netloc.replace('www.', '') if parsed_url and parsed_url.netloc else None
-                            source = domain or data.get('source') or data.get('domain') or 'Unknown'
-
+                            # Format candidate
                             candidate = {
-                                'title': data.get('title') or data.get('headline') or 'Untitled',
-                                'description': data.get('description') or data.get('summary') or '',
-                                'url': data.get('url') or data.get('link') or '',
-                                'source': source,
+                                'title': article.get('title', 'Untitled'),
+                                'url': article.get('url', ''),
+                                'source': article.get('source', {}).get('name', 'Unknown'),
+                                'description': article.get('description') or '',
                                 'date': pub_date.isoformat(),
-                                'position': len(candidates),  # Track position in search results
+                                'interest': interest,
+                                'position': len(all_candidates),
                             }
 
+                            # Only add if URL is present
                             if candidate['url']:
-                                candidates.append(candidate)
+                                interest_candidates.append(candidate)
+                                logger.debug(f"Added candidate: {candidate['title'][:50]}...")
 
                         except Exception as e:
-                            logger.warning(f"Failed to extract candidate metadata: {e}")
+                            logger.warning(f"Failed to parse News API article: {e}")
                             continue
 
-                    logger.info(f"Returning {len(candidates)} candidates after date filtering")
-                    return candidates
+                    logger.info(f"Added {len(interest_candidates)} candidates for interest '{interest}' after filtering")
+                    all_candidates.extend(interest_candidates)
 
                 except Exception as e:
-                    logger.warning(f"Search attempt {attempt + 1}/{self.max_retries} failed: {e}")
-                    if attempt < self.max_retries - 1:
-                        await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
-                    else:
-                        raise APIError(f"Search failed after {self.max_retries} attempts: {e}")
+                    logger.error(f"Error searching News API for interest '{interest}': {e}", exc_info=True)
+                    continue  # Continue with next interest
 
-            return []
+            logger.info(f"Returning {len(all_candidates)} total candidates from News API across {len(interests)} interests")
+            return all_candidates
 
-        except RateLimitError:
-            logger.error("Rate limit exceeded")
-            raise
         except Exception as e:
-            logger.error(f"Error searching news candidates: {e}", exc_info=True)
-            raise FirecrawlNewsServiceError(f"Failed to search news candidates: {e}")
+            logger.error(f"Error in News API search: {e}", exc_info=True)
+            raise FirecrawlNewsServiceError(f"Failed to search news candidates via News API: {e}")
 
     async def scrape_selected_articles(
         self,
@@ -307,7 +397,7 @@ class FirecrawlNewsService:
                     url
                 )
 
-                self._track_request(cost=self.SCRAPE_COST_PER_PAGE)
+                self._track_request(cost=self.SCRAPE_COST_PER_PAGE, request_type='scrape')
 
                 if result:
                     # Get metadata override for this URL
@@ -446,7 +536,7 @@ class FirecrawlNewsService:
                     limit
                 )
 
-                self._track_request(cost=self.SEARCH_COST_PER_REQUEST)
+                self._track_request(cost=self.SEARCH_COST_PER_REQUEST, request_type='search')
                 return result
 
             except Exception as e:
@@ -632,7 +722,7 @@ class FirecrawlNewsService:
                 result = self.client.scrape_url(url)
                 if result:
                     articles.append(result)
-                    self._track_request(cost=self.SCRAPE_COST_PER_PAGE)
+                    self._track_request(cost=self.SCRAPE_COST_PER_PAGE, request_type='scrape')
             except Exception as e:
                 logger.warning(f"Failed to scrape {url}: {e}")
                 continue
@@ -643,13 +733,23 @@ class FirecrawlNewsService:
         """
         Build optimized search query from interests.
 
+        Supports both single-interest queries (for per-interest searching) and
+        multi-interest queries (for broader searches).
+
         Args:
-            interests: List of interest keywords
+            interests: List of interest keywords (can be single or multiple)
 
         Returns:
             Formatted search query string
         """
-        # Combine interests with OR logic for broad coverage
+        if not interests:
+            return ""
+
+        # For single interest, create a focused query
+        if len(interests) == 1:
+            return f'"{interests[0]}" news'
+
+        # For multiple interests, combine with OR logic for broad coverage
         # Add "news" keyword to focus on news content
         query_parts = [f'"{interest}" news' for interest in interests[:5]]
         return ' OR '.join(query_parts)
@@ -669,7 +769,7 @@ class FirecrawlNewsService:
         Returns:
             Filtered list of recent articles
         """
-        cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
         filtered = []
 
         for article in articles:
@@ -736,8 +836,11 @@ class FirecrawlNewsService:
             # Extract metadata object (Firecrawl v2 nested structure)
             metadata = data.get('metadata', {})
 
-            # Extract fields with fallbacks
-            title = metadata.get('title') or data.get('title') or data.get('headline') or 'Untitled'
+            # Extract title - prioritize metadata_override which has the original search title
+            if metadata_override and metadata_override.get('title'):
+                title = metadata_override.get('title')
+            else:
+                title = metadata.get('title') or data.get('title') or data.get('headline') or 'Untitled'
 
             # Content - prioritize markdown from scrapeOptions, then fallback to other fields
             # Firecrawl returns full article as markdown when using scrapeOptions
@@ -768,16 +871,22 @@ class FirecrawlNewsService:
                         elif isinstance(override_date, datetime):
                             published_date = override_date
                         else:
-                            published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                            published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.now(timezone.utc)
                     except (ValueError, AttributeError):
-                        published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                        published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.now(timezone.utc)
                 else:
-                    published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                    published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.now(timezone.utc)
 
                 logger.info(f"Using metadata override for article: source={source}, date={published_date}")
             else:
                 source = metadata.get('source') or data.get('source') or data.get('domain') or 'Unknown'
-                published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.utcnow()
+                published_date = metadata.get('published_date') or data.get('published_date') or data.get('publishedAt') or datetime.now(timezone.utc)
+
+            # Extract URL - prioritize metadata_override which has the original search URL
+            if metadata_override and metadata_override.get('url'):
+                url = metadata_override.get('url')
+            else:
+                url = data.get('url') or data.get('link') or metadata.get('url') or 'https://example.com'
 
             # Build FetchedNewsArticle
             article = FetchedNewsArticle(
@@ -787,7 +896,7 @@ class FirecrawlNewsService:
                 source=source,
                 author=metadata.get('author') or data.get('author'),
                 published_date=published_date,
-                url=data.get('url') or data.get('link') or 'https://example.com',
+                url=url,
                 topics=data.get('topics') or data.get('categories') or [],
             )
 
@@ -858,7 +967,7 @@ class FirecrawlNewsService:
             topic_score = min(topic_matches / len(interests), 1.0) * 0.2
 
         # 4. Recency bonus (10% weight)
-        age_hours = (datetime.utcnow() - article.published_date).total_seconds() / 3600
+        age_hours = (datetime.now(timezone.utc) - article.published_date).total_seconds() / 3600
         # Exponential decay: newer = higher score
         recency_score = max(0, 1 - (age_hours / (24 * 7))) * 0.1  # 7-day decay
 
@@ -881,7 +990,7 @@ class FirecrawlNewsService:
         Raises:
             RateLimitError: If rate limit would be exceeded
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Clean old timestamps (older than 1 minute)
         self._request_timestamps = [
@@ -900,18 +1009,25 @@ class FirecrawlNewsService:
         # Add current request timestamp
         self._request_timestamps.append(now)
 
-    def _track_request(self, cost: float) -> None:
+    def _track_request(self, cost: float, request_type: str = 'unknown') -> None:
         """
         Track API usage and costs.
 
         Args:
             cost: Estimated cost in USD for this request
+            request_type: Type of request ('search' or 'scrape')
         """
         self._total_requests += 1
         self._total_cost += cost
 
+        if request_type == 'search':
+            self._total_searches += 1
+        elif request_type == 'scrape':
+            self._total_scrapes += 1
+
         logger.info(
-            f"API Usage - Total requests: {self._total_requests}, "
+            f"API Usage - Total requests: {self._total_requests} "
+            f"(searches: {self._total_searches}, scrapes: {self._total_scrapes}), "
             f"Total cost: ${self._total_cost:.4f}"
         )
 
@@ -924,6 +1040,9 @@ class FirecrawlNewsService:
         """
         return {
             'total_requests': self._total_requests,
+            'total_searches': self._total_searches,
+            'total_scrapes': self._total_scrapes,
+            'news_api_requests': self._news_api_requests,
             'total_cost_usd': round(self._total_cost, 4),
             'requests_last_minute': len(self._request_timestamps),
             'rate_limit': self.MAX_REQUESTS_PER_MINUTE,
@@ -932,6 +1051,9 @@ class FirecrawlNewsService:
     def reset_usage_stats(self) -> None:
         """Reset usage tracking counters."""
         self._total_requests = 0
+        self._total_searches = 0
+        self._total_scrapes = 0
+        self._news_api_requests = 0
         self._total_cost = 0.0
         self._request_timestamps = []
         logger.info("Usage statistics reset")

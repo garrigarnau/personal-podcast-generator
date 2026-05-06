@@ -53,8 +53,8 @@ export const VolumeChart: React.FC<VolumeChartProps> = ({
   // Prepare chart data
   const chartData = data.map((point) => ({
     date: formatDate(point.date),
-    count: point.count,
-    avgLatency: parseFloat(point.avgLatency.toFixed(1)),
+    count: point.count || 0,
+    avgLatency: point.avgLatency ? parseFloat(point.avgLatency.toFixed(1)) : 0,
   }));
 
   return (

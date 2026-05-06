@@ -243,9 +243,52 @@ export async function getAdminStats(
   try {
     const params = days ? { days } : {};
     const response = await withRetry(() =>
-      apiClient.get<AdminStats>('/api/v1/admin/stats', { params })
+      apiClient.get<any>('/api/v1/admin/stats', { params })
     );
-    return response.data;
+
+    // Transform API response (snake_case) to frontend format (camelCase)
+    const data = response.data;
+
+    return {
+      kpis: {
+        totalPodcasts: data.kpis.total_podcasts || 0,
+        avgLatency: data.kpis.avg_latency_ms ? data.kpis.avg_latency_ms / 1000 : 0, // Convert ms to seconds
+        totalApiCost: data.kpis.total_cost_usd || 0,
+        successRate: data.kpis.success_rate ? data.kpis.success_rate / 100 : 0, // Convert percentage to decimal
+        totalFirecrawlScrapes: data.kpis.total_firecrawl_scrapes || 0,
+        totalFirecrawlCost: data.kpis.total_firecrawl_cost || 0,
+        totalOpenaiCost: data.kpis.total_openai_cost || 0,
+        totalElevenlabsCost: data.kpis.total_elevenlabs_cost || 0,
+        costBreakdown: data.kpis.cost_breakdown || { openai: 0, elevenlabs: 0, firecrawl: 0 },
+        latencyBreakdown: data.kpis.latency_breakdown ? {
+          newsFetch: data.kpis.latency_breakdown.news_fetch || 0,
+          scriptGeneration: data.kpis.latency_breakdown.script_generation || 0,
+          audioGeneration: data.kpis.latency_breakdown.audio_generation || 0,
+        } : undefined,
+      },
+      volumeData: (data.volume_data || []).map((item: any) => ({
+        date: item.day,
+        count: item.total || 0,
+        avgLatency: item.avg_latency_ms ? item.avg_latency_ms / 1000 : 0, // Convert ms to seconds
+      })),
+      recentTasks: (data.recent_podcasts || []).map((podcast: any) => ({
+        id: podcast.id,
+        status: podcast.status,
+        createdAt: podcast.created_at,
+        completedAt: undefined, // Not provided by API
+        duration: podcast.latency_ms ? podcast.latency_ms / 1000 : undefined, // Convert ms to seconds
+        error: podcast.error_message,
+        interests: [], // Not provided by API
+        firecrawlSearches: podcast.firecrawl_searches ?? undefined,
+        firecrawlScrapes: podcast.firecrawl_scrapes ?? undefined,
+        firecrawlCost: podcast.firecrawl_cost ?? undefined,
+        tokensUsed: podcast.tokens_used ?? undefined,
+        elevenlabsChars: podcast.elevenlabs_characters ?? undefined,
+        openaiCost: podcast.openai_cost ?? undefined,
+        elevenlabsCost: podcast.elevenlabs_cost ?? undefined,
+        totalCost: podcast.cost_usd ?? undefined,
+      })),
+    };
   } catch (error) {
     throw parseError(error);
   }
@@ -286,6 +329,7 @@ export async function updateUserPreferences(data: {
   interests?: string[];
   duration_minutes?: number;
   language?: string;
+  tone?: string;
 }): Promise<any> {
   try {
     const response = await apiClient.put('/api/v1/users/me/preferences', data);

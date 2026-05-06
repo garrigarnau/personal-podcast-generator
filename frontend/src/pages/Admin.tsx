@@ -7,22 +7,36 @@ import HealthMonitor from '../components/HealthMonitor';
 import { AdminStats } from '../types/admin';
 import { getAdminStats, ApiError } from '../services/api';
 
-// Mock data for initial development
+// Mock data for fallback (matches live data structure)
 const MOCK_DATA: AdminStats = {
   kpis: {
-    totalPodcasts: 156,
-    avgLatency: 87.5,
-    totalApiCost: 45.67,
-    successRate: 0.943,
+    totalPodcasts: 28,
+    avgLatency: 120.0,
+    totalApiCost: 14.25,
+    successRate: 0.679,
+    totalFirecrawlScrapes: 420,
+    totalFirecrawlCost: 2.10,
+    totalOpenaiCost: 1.18,
+    totalElevenlabsCost: 10.97,
+    costBreakdown: {
+      openai: 1.18,
+      elevenlabs: 10.97,
+      firecrawl: 2.10,
+    },
+    latencyBreakdown: {
+      newsFetch: 35000.0,
+      scriptGeneration: 40000.0,
+      audioGeneration: 45000.0,
+    },
   },
   volumeData: [
-    { date: '2026-04-28', count: 12, avgLatency: 85.3 },
-    { date: '2026-04-29', count: 18, avgLatency: 92.1 },
-    { date: '2026-04-30', count: 15, avgLatency: 78.5 },
-    { date: '2026-05-01', count: 22, avgLatency: 88.9 },
-    { date: '2026-05-02', count: 19, avgLatency: 86.2 },
-    { date: '2026-05-03', count: 25, avgLatency: 90.4 },
-    { date: '2026-05-04', count: 20, avgLatency: 84.7 },
+    { date: '2026-04-28', count: 3, avgLatency: 115.2 },
+    { date: '2026-04-29', count: 5, avgLatency: 122.1 },
+    { date: '2026-04-30', count: 4, avgLatency: 118.5 },
+    { date: '2026-05-01', count: 2, avgLatency: 108.9 },
+    { date: '2026-05-02', count: 6, avgLatency: 126.2 },
+    { date: '2026-05-03', count: 4, avgLatency: 120.4 },
+    { date: '2026-05-04', count: 4, avgLatency: 114.7 },
   ],
   recentTasks: [
     {
@@ -32,14 +46,28 @@ const MOCK_DATA: AdminStats = {
       completedAt: new Date(Date.now() - 13 * 60000).toISOString(),
       duration: 120,
       interests: ['AI', 'Technology', 'Space'],
+      firecrawlScrapes: 15,
+      firecrawlCost: 0.075,
+      tokensUsed: 5000,
+      elevenlabsChars: 3750,
+      openaiCost: 0.042,
+      elevenlabsCost: 1.125,
+      totalCost: 1.242,
     },
     {
       id: 'task-002',
       status: 'completed',
       createdAt: new Date(Date.now() - 45 * 60000).toISOString(),
       completedAt: new Date(Date.now() - 43 * 60000).toISOString(),
-      duration: 95,
+      duration: 115,
       interests: ['Climate', 'Environment'],
+      firecrawlScrapes: 15,
+      firecrawlCost: 0.075,
+      tokensUsed: 4800,
+      elevenlabsChars: 3600,
+      openaiCost: 0.040,
+      elevenlabsCost: 1.080,
+      totalCost: 1.195,
     },
     {
       id: 'task-003',
@@ -48,6 +76,9 @@ const MOCK_DATA: AdminStats = {
       duration: 30,
       error: 'API timeout',
       interests: ['Politics', 'Economy'],
+      firecrawlScrapes: 10,
+      firecrawlCost: 0.050,
+      tokensUsed: 1234,
     },
     {
       id: 'task-004',
@@ -60,18 +91,25 @@ const MOCK_DATA: AdminStats = {
       status: 'completed',
       createdAt: new Date(Date.now() - 120 * 60000).toISOString(),
       completedAt: new Date(Date.now() - 118 * 60000).toISOString(),
-      duration: 110,
+      duration: 125,
       interests: ['Science', 'Research'],
+      firecrawlScrapes: 15,
+      firecrawlCost: 0.075,
+      tokensUsed: 5200,
+      elevenlabsChars: 3900,
+      openaiCost: 0.044,
+      elevenlabsCost: 1.170,
+      totalCost: 1.289,
     },
   ],
 };
 
 export const Admin: React.FC = () => {
   const [stats, setStats] = useState<AdminStats>(MOCK_DATA);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
-  const [useMockData, setUseMockData] = useState(true);
+  const [useMockData, setUseMockData] = useState(false);
 
   // Fetch admin stats
   const fetchStats = useCallback(async () => {
@@ -264,7 +302,7 @@ export const Admin: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Avg Cost per Podcast</span>
                   <span className="text-sm font-semibold text-gray-900">
-                    ${(stats.kpis.totalApiCost / stats.kpis.totalPodcasts).toFixed(2)}
+                    ${stats.kpis.totalPodcasts > 0 ? (stats.kpis.totalApiCost / stats.kpis.totalPodcasts).toFixed(2) : '0.00'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
@@ -282,11 +320,12 @@ export const Admin: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Fastest Generation</span>
                   <span className="text-sm font-semibold text-gray-900">
-                    {Math.min(
-                      ...stats.recentTasks
-                        .filter((t) => t.duration)
-                        .map((t) => t.duration!)
-                    )}s
+                    {(() => {
+                      const durations = stats.recentTasks
+                        .filter((t) => t.duration && t.duration > 0)
+                        .map((t) => t.duration!);
+                      return durations.length > 0 ? `${Math.min(...durations).toFixed(0)}s` : 'N/A';
+                    })()}
                   </span>
                 </div>
               </div>

@@ -7,6 +7,7 @@ reliability with comprehensive error handling, metrics tracking, and database st
 
 Key Features:
 - Async-first architecture for high performance
+- LangChain multi-agent AI services with LangSmith tracing
 - Comprehensive database status tracking (Pending → Processing → Completed/Failed)
 - Detailed metrics collection for each pipeline stage
 - Graceful error handling with partial result preservation
@@ -14,9 +15,9 @@ Key Features:
 - Integration with FastAPI BackgroundTasks
 
 Architecture:
-    News Service → Script Service → Audio Service → Storage
-         ↓              ↓                ↓             ↓
-    Update Status → Save Script → Save Audio → Final Metrics
+    News API Search → Firecrawl Scrape → Script Generator (LangChain) → Audio Service → Storage
+          ↓                  ↓                   ↓ (Multi-agent)              ↓             ↓
+    Update Status    Fetch Articles     AI Script Writing          → Save Audio → Final Metrics
 
 Example:
     >>> orchestrator = PodcastOrchestrator(db_session)
@@ -31,19 +32,23 @@ Example:
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.models.podcast import Podcast, PodcastStatus
 from app.models.metrics import Metrics
 from app.services.news_service import FirecrawlNewsService, FetchedNewsArticle
-from app.services.article_selector_service import ArticleSelectorService
+
+# LangChain-powered services
+from app.services.script_generator_langchain import ScriptGeneratorService
+
+# Import types from original script_service
 from app.services.script_service import (
-    ScriptGeneratorService,
     NewsArticle,
     PodcastScript,
     GenerationMetrics as ScriptMetrics,
@@ -103,7 +108,6 @@ class PodcastOrchestrator:
         """
         self.db = db
         self.news_service = FirecrawlNewsService()
-        self.article_selector = ArticleSelectorService()
         self.script_service = ScriptGeneratorService()
         self.audio_service = ElevenLabsAudioService(mock_mode=mock_audio)
 
@@ -154,7 +158,10 @@ class PodcastOrchestrator:
             ...     }
             ... )
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
+
+        # Create a unique thread_id for this podcast generation to group all LangChain runs
+        thread_id = str(uuid4())
 
         # Initialize metrics tracking
         stage_metrics = {
@@ -163,12 +170,17 @@ class PodcastOrchestrator:
             "audio_generation_ms": 0,
             "tokens_used": 0,
             "elevenlabs_characters": 0,
+            "firecrawl_searches": 0,
+            "firecrawl_scrapes": 0,
+            "firecrawl_cost": 0.0,
+            "openai_cost": 0.0,
+            "elevenlabs_cost": 0.0,
             "cost_estimate": 0.0,
         }
 
         logger.info(
             f"Starting podcast generation: podcast_id={podcast_id}, "
-            f"user_id={user_id}, interests={interests}"
+            f"user_id={user_id}, interests={interests}, thread_id={thread_id}"
         )
 
         try:
@@ -186,13 +198,27 @@ class PodcastOrchestrator:
 
             # Stage 2: Fetch news articles
             logger.info(f"[{podcast_id}] Stage 1/3: Fetching news articles...")
+
+            # Get initial Firecrawl usage for tracking
+            initial_firecrawl_stats = self.news_service.get_usage_stats()
+
             articles, news_latency = await self._fetch_news(
                 interests=interests,
                 preferences=preferences,
+                thread_id=thread_id,
             )
+
+            # Capture Firecrawl usage for this podcast generation
+            final_firecrawl_stats = self.news_service.get_usage_stats()
+            stage_metrics["firecrawl_searches"] = final_firecrawl_stats['total_searches'] - initial_firecrawl_stats['total_searches']
+            stage_metrics["firecrawl_scrapes"] = final_firecrawl_stats['total_scrapes'] - initial_firecrawl_stats['total_scrapes']
+            stage_metrics["firecrawl_cost"] = final_firecrawl_stats['total_cost_usd'] - initial_firecrawl_stats['total_cost_usd']
+            stage_metrics["cost_estimate"] += stage_metrics["firecrawl_cost"]
+
             stage_metrics["news_fetch_ms"] = news_latency
             logger.info(
-                f"[{podcast_id}] Fetched {len(articles)} articles in {news_latency}ms"
+                f"[{podcast_id}] Fetched {len(articles)} articles in {news_latency}ms "
+                f"(Firecrawl: {stage_metrics['firecrawl_searches']} searches + {stage_metrics['firecrawl_scrapes']} scrapes, ${stage_metrics['firecrawl_cost']:.4f})"
             )
 
             if not articles:
@@ -206,9 +232,11 @@ class PodcastOrchestrator:
             script, script_metrics, script_latency = await self._generate_script(
                 articles=articles,
                 preferences=preferences,
+                thread_id=thread_id,
             )
             stage_metrics["script_generation_ms"] = script_latency
             stage_metrics["tokens_used"] = script_metrics.tokens_used
+            stage_metrics["openai_cost"] = script_metrics.cost_estimate
             stage_metrics["cost_estimate"] += script_metrics.cost_estimate
 
             logger.info(
@@ -216,8 +244,10 @@ class PodcastOrchestrator:
                 f"{script_metrics.tokens_used} tokens, {script_latency}ms"
             )
 
-            # Save script to podcast
+            # Save script and title to podcast
             podcast.script = script.get_full_text()
+            podcast.title = script.title
+            logger.info(f"[{podcast_id}] Title: {podcast.title}")
 
             # Collect article information for sources
             article_sources = [
@@ -229,7 +259,7 @@ class PodcastOrchestrator:
                 for article in articles
             ]
 
-            podcast.podcast_metadata = json.dumps({
+            metadata_dict = {
                 "topics": script.topics_covered,
                 "sources": script.sources_cited,
                 "articles": article_sources,  # Full article details with URLs
@@ -237,7 +267,10 @@ class PodcastOrchestrator:
                 "estimated_duration": script.estimated_duration_seconds,
                 "tone": script.tone.value,
                 "length": script.length.value,
-            })
+            }
+            podcast.podcast_metadata = json.dumps(metadata_dict)
+            logger.info(f"[{podcast_id}] Saving metadata with {len(article_sources)} articles")
+            logger.debug(f"[{podcast_id}] Metadata: {json.dumps(metadata_dict)[:200]}")
             await self.db.flush()
 
             # Stage 4: Generate audio
@@ -256,6 +289,7 @@ class PodcastOrchestrator:
                 )
 
             stage_metrics["elevenlabs_characters"] = audio_response.audio_file.metrics.total_characters
+            stage_metrics["elevenlabs_cost"] = audio_response.audio_file.metrics.cost_estimate
             stage_metrics["cost_estimate"] += audio_response.audio_file.metrics.cost_estimate
 
             logger.info(
@@ -268,7 +302,7 @@ class PodcastOrchestrator:
             await self._update_status(podcast, PodcastStatus.COMPLETED)
 
             # Stage 6: Save comprehensive metrics
-            total_latency = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            total_latency = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             await self._save_metrics(
                 podcast_id=podcast_id,
                 stage_metrics=stage_metrics,
@@ -354,7 +388,7 @@ class PodcastOrchestrator:
         """
         try:
             podcast.status = status
-            podcast.updated_at = datetime.utcnow()
+            podcast.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await self.db.flush()
             logger.debug(f"Podcast {podcast.id} status updated to {status.value}")
         except Exception as e:
@@ -365,13 +399,18 @@ class PodcastOrchestrator:
         self,
         interests: List[str],
         preferences: Dict[str, Any],
+        thread_id: str,
     ) -> tuple[List[FetchedNewsArticle], int]:
         """
-        Fetch news articles using 3-phase flow: search -> AI select -> scrape.
+        Fetch news articles using simplified 2-phase flow: search -> scrape.
+
+        Skips AI selection for faster, simpler pipeline. News API already returns
+        relevant articles based on our queries, so we scrape all results directly.
 
         Args:
             interests: List of user interests/topics
             preferences: User preferences (tone, length, days_back, etc.)
+            thread_id: LangSmith thread ID to group all AI calls
 
         Returns:
             Tuple of (articles_list, latency_ms)
@@ -379,21 +418,21 @@ class PodcastOrchestrator:
         Raises:
             PodcastGenerationError: If news fetching fails
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             days_back = preferences.get("days_back", 7)
-            tone = preferences.get("tone", "conversational")
-            length = preferences.get("length", "medium")
 
-            # PHASE 1: Search for candidates
-            logger.info(f"Phase 1: Searching for 10 candidate articles (days_back={days_back})")
+            # PHASE 1: Search for articles via News API (per-interest strategy)
+            articles_per_interest = 3
+            total_candidates = len(interests) * articles_per_interest
+            logger.info(f"Phase 1: Searching for {total_candidates} articles ({len(interests)} interests × {articles_per_interest} articles, days_back={days_back})")
             candidates = await self.news_service.search_news_candidates(
                 interests=interests,
-                limit=10,
+                limit=total_candidates,
                 days_back=days_back
             )
-            logger.info(f"Phase 1 complete: Found {len(candidates)} candidates")
+            logger.info(f"Phase 1 complete: Found {len(candidates)} candidates from News API")
 
             if not candidates:
                 raise PodcastGenerationError(
@@ -401,34 +440,20 @@ class PodcastOrchestrator:
                     message="No candidate articles found for given interests",
                 )
 
-            # PHASE 2: AI Selection
-            logger.info(f"Phase 2: AI selecting best 5 articles from {len(candidates)} candidates")
-            selected_urls = await self.article_selector.select_articles(
-                candidates=candidates,
-                interests=interests,
-                tone=tone,
-                length=length
-            )
-
-            # FALLBACK: If AI fails or returns empty, select top 5 by position
-            if not selected_urls:
-                logger.warning("Phase 2: AI selection returned empty, falling back to top 5 candidates")
-                selected_urls = [article["url"] for article in candidates[:5]]
-
-            logger.info(f"Phase 2 complete: Selected {len(selected_urls)} articles")
-
-            # PHASE 3: Scrape selected (with metadata preservation)
-            logger.info(f"Phase 3: Scraping {len(selected_urls)} selected articles")
-            articles = await self.news_service.scrape_selected_articles(selected_urls, candidates)
-            logger.info(f"Phase 3 complete: Successfully scraped {len(articles)} articles")
+            # PHASE 2: Scrape all candidates directly (no AI selection)
+            # News API already returned relevant articles, scrape them all
+            candidate_urls = [article["url"] for article in candidates]
+            logger.info(f"Phase 2: Scraping all {len(candidate_urls)} articles directly (no AI selection)")
+            articles = await self.news_service.scrape_selected_articles(candidate_urls, candidates)
+            logger.info(f"Phase 2 complete: Successfully scraped {len(articles)} articles")
 
             if not articles:
                 raise PodcastGenerationError(
                     stage="news_fetch",
-                    message="Failed to scrape any of the selected articles",
+                    message="Failed to scrape any of the articles",
                 )
 
-            latency_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            latency_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             return articles, latency_ms
 
         except PodcastGenerationError:
@@ -445,6 +470,7 @@ class PodcastOrchestrator:
         self,
         articles: List[FetchedNewsArticle],
         preferences: Dict[str, Any],
+        thread_id: str,
     ) -> tuple[PodcastScript, ScriptMetrics, int]:
         """
         Generate podcast script from news articles.
@@ -452,6 +478,7 @@ class PodcastOrchestrator:
         Args:
             articles: List of fetched news articles
             preferences: User preferences (tone, length, etc.)
+            thread_id: LangSmith thread ID to group all AI calls
 
         Returns:
             Tuple of (script, metrics, latency_ms)
@@ -459,7 +486,7 @@ class PodcastOrchestrator:
         Raises:
             PodcastGenerationError: If script generation fails
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             # Convert FetchedNewsArticle to NewsArticle for script service
@@ -479,9 +506,10 @@ class PodcastOrchestrator:
             script, metrics = await self.script_service.generate_script(
                 news_articles=news_articles,
                 preferences=preferences,
+                thread_id=thread_id,
             )
 
-            latency_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            latency_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             return script, metrics, latency_ms
 
         except Exception as e:
@@ -491,6 +519,98 @@ class PodcastOrchestrator:
                 message=f"Failed to generate script: {str(e)}",
                 original_error=e,
             )
+
+    async def _generate_title(
+        self,
+        script: PodcastScript,
+        interests: List[str],
+        thread_id: str,
+    ) -> str:
+        """
+        Generate a headline-style summary title for the podcast using OpenAI.
+
+        Args:
+            script: Generated podcast script
+            interests: User's interests/topics
+            thread_id: LangSmith thread ID to group this call with the rest of the pipeline
+
+        Returns:
+            Generated title string (headline-style summary)
+
+        Raises:
+            PodcastGenerationError: If title generation fails
+        """
+        try:
+            from langchain_openai import ChatOpenAI
+
+            # Use more of the script for better context
+            script_preview = script.get_full_text()[:2000]  # First 2000 chars
+            topics = ", ".join(interests)
+
+            # Use OpenAI to generate a title
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",  # Fast and cheap for simple tasks
+                temperature=0.5,  # Lower temperature for more focused headlines
+                api_key=settings.OPENAI_API_KEY,
+            )
+
+            prompt = f"""Generate a news-style headline that summarizes this podcast episode.
+
+Topics covered: {topics}
+
+Podcast script:
+{script_preview}
+
+Requirements:
+- Write like a news headline (concise summary of the main story)
+- Maximum 100 characters
+- Capture the key points discussed
+- Professional and informative tone
+- No quotes or special formatting
+- Should help users quickly understand what the podcast covers
+
+Examples of good headlines:
+- "Tech Giants Face New AI Regulations and Privacy Concerns"
+- "Global Markets Rally as Inflation Shows Signs of Cooling"
+- "Breakthrough in Cancer Research Shows Promising Results"
+
+Return ONLY the headline, nothing else."""
+
+            # Configure LangSmith tracing with thread_id
+            config = {
+                "metadata": {
+                    "thread_id": thread_id,
+                    "stage": "title_generation",
+                    "operation": "generate_headline",
+                }
+            }
+
+            response = await llm.ainvoke(prompt, config=config)
+            title = response.content.strip()
+
+            # Remove any quotes if present
+            title = title.strip('"\'')
+
+            # Truncate if too long
+            if len(title) > 100:
+                title = title[:97] + "..."
+
+            logger.info(f"Generated headline: {title}")
+            return title
+
+        except Exception as e:
+            logger.warning(f"Failed to generate title, using fallback: {e}")
+            # Fallback: Create simple headline from interests
+            if len(interests) == 1:
+                fallback = f"Today's Updates on {interests[0].title()}"
+            elif len(interests) == 2:
+                fallback = f"{interests[0].title()} and {interests[1].title()} Updates"
+            else:
+                fallback = f"Latest in {', '.join([i.title() for i in interests[:3]])}"
+
+            if len(fallback) > 100:
+                fallback = fallback[:97] + "..."
+            return fallback
 
     async def _generate_audio(
         self,
@@ -512,7 +632,7 @@ class PodcastOrchestrator:
         Raises:
             PodcastGenerationError: If audio generation fails
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         try:
             # Extract voice settings from preferences if provided
@@ -524,7 +644,7 @@ class PodcastOrchestrator:
                 voice_settings=voice_settings,
             )
 
-            latency_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+            latency_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
             return response, latency_ms
 
         except Exception as e:
@@ -565,11 +685,16 @@ class PodcastOrchestrator:
                 # Update existing metrics
                 metrics.tokens_used = stage_metrics.get("tokens_used", 0)
                 metrics.elevenlabs_characters = stage_metrics.get("elevenlabs_characters", 0)
+                metrics.firecrawl_searches = stage_metrics.get("firecrawl_searches", 0)
+                metrics.firecrawl_scrapes = stage_metrics.get("firecrawl_scrapes", 0)
+                metrics.firecrawl_cost = stage_metrics.get("firecrawl_cost", 0.0)
+                metrics.openai_cost = stage_metrics.get("openai_cost", 0.0)
+                metrics.elevenlabs_cost = stage_metrics.get("elevenlabs_cost", 0.0)
                 metrics.latency_ms = total_latency_ms
                 metrics.news_fetch_ms = stage_metrics.get("news_fetch_ms", 0)
                 metrics.script_generation_ms = stage_metrics.get("script_generation_ms", 0)
                 metrics.audio_generation_ms = stage_metrics.get("audio_generation_ms", 0)
-                metrics.cost_estimate = stage_metrics.get("cost_estimate", 0.0)
+                # Calculate cost_estimate from individual costs (don't set manually)
                 metrics.update_cost_estimate()
             else:
                 # Create new metrics
@@ -577,20 +702,29 @@ class PodcastOrchestrator:
                     podcast_id=uuid_obj,
                     tokens_used=stage_metrics.get("tokens_used", 0),
                     elevenlabs_characters=stage_metrics.get("elevenlabs_characters", 0),
+                    firecrawl_searches=stage_metrics.get("firecrawl_searches", 0),
+                    firecrawl_scrapes=stage_metrics.get("firecrawl_scrapes", 0),
+                    firecrawl_cost=stage_metrics.get("firecrawl_cost", 0.0),
+                    openai_cost=stage_metrics.get("openai_cost", 0.0),
+                    elevenlabs_cost=stage_metrics.get("elevenlabs_cost", 0.0),
                     latency_ms=total_latency_ms,
                     news_fetch_ms=stage_metrics.get("news_fetch_ms", 0),
                     script_generation_ms=stage_metrics.get("script_generation_ms", 0),
                     audio_generation_ms=stage_metrics.get("audio_generation_ms", 0),
-                    cost_estimate=stage_metrics.get("cost_estimate", 0.0),
+                    # Don't set cost_estimate manually, will be calculated below
                 )
                 self.db.add(metrics)
+                # Calculate cost_estimate from individual costs
+                metrics.update_cost_estimate()
 
             await self.db.flush()
 
             logger.info(
                 f"Metrics saved for podcast {podcast_id}: "
                 f"tokens={metrics.tokens_used}, chars={metrics.elevenlabs_characters}, "
-                f"cost=${metrics.cost_estimate:.4f}"
+                f"firecrawl={metrics.firecrawl_searches} searches + {metrics.firecrawl_scrapes} scrapes, "
+                f"cost=${metrics.cost_estimate:.4f} (OpenAI=${metrics.openai_cost:.4f} + "
+                f"ElevenLabs=${metrics.elevenlabs_cost:.4f} + Firecrawl=${metrics.firecrawl_cost:.4f})"
             )
 
         except Exception as e:
@@ -619,7 +753,7 @@ class PodcastOrchestrator:
             if podcast:
                 podcast.status = PodcastStatus.FAILED
                 podcast.error_message = error_message[:1000]  # Truncate if too long
-                podcast.updated_at = datetime.utcnow()
+                podcast.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
                 # Try to save partial metrics
                 if any(stage_metrics.values()):

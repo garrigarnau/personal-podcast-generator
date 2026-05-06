@@ -95,6 +95,7 @@ class UpdateUserPreferencesRequest(BaseModel):
         sources: Updated list of sources (optional)
         language: Updated language preference (optional)
         duration_minutes: Updated default duration (optional)
+        tone: Updated podcast tone (optional)
         voice_settings: Updated voice settings (optional)
     """
 
@@ -129,6 +130,11 @@ class UpdateUserPreferencesRequest(BaseModel):
         description="Updated default duration",
     )
 
+    tone: Optional[str] = Field(
+        default=None,
+        description="Updated podcast tone (professional, casual, educational, conversational)",
+    )
+
     voice_settings: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Updated voice settings",
@@ -139,6 +145,7 @@ class UpdateUserPreferencesRequest(BaseModel):
             "example": {
                 "interests": ["AI", "quantum computing"],
                 "duration_minutes": 15,
+                "tone": "professional",
                 "voice_settings": {
                     "voice_id": "21m00Tcm4TlvDq8ikWAM",
                     "stability": 0.6,

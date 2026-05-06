@@ -27,6 +27,12 @@ class KPISummary(BaseModel):
     success_rate: float = Field(..., ge=0, le=100, description="Success rate (%)")
     total_tokens: int = Field(..., ge=0, description="Total GPT-4 tokens")
     total_characters: int = Field(..., ge=0, description="Total ElevenLabs characters")
+    total_firecrawl_scrapes: int = Field(..., ge=0, description="Total Firecrawl scrapes")
+    total_firecrawl_cost: float = Field(..., ge=0, description="Total Firecrawl cost (USD)")
+    total_openai_cost: float = Field(..., ge=0, description="Total OpenAI cost (USD)")
+    total_elevenlabs_cost: float = Field(..., ge=0, description="Total ElevenLabs cost (USD)")
+    cost_breakdown: Dict[str, float] = Field(..., description="Cost breakdown by service")
+    latency_breakdown: Dict[str, float] = Field(..., description="Latency breakdown by service (ms)")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -36,7 +42,19 @@ class KPISummary(BaseModel):
                 "total_cost_usd": 123.45,
                 "success_rate": 98.5,
                 "total_tokens": 500000,
-                "total_characters": 250000
+                "total_characters": 250000,
+                "total_firecrawl_scrapes": 3000,
+                "total_firecrawl_cost": 15.50,
+                "cost_breakdown": {
+                    "openai": 15.0,
+                    "elevenlabs": 75.0,
+                    "firecrawl": 15.50
+                },
+                "latency_breakdown": {
+                    "news_fetch": 35000.0,
+                    "script_generation": 40000.0,
+                    "audio_generation": 45000.0
+                }
             }
         }
     )
@@ -86,6 +104,7 @@ class RecentPodcastItem(BaseModel):
     Attributes:
         id: Podcast identifier
         user_id: User identifier
+        title: AI-generated podcast title
         status: Current status
         created_at: Creation timestamp
         latency_ms: Generation latency (if available)
@@ -95,11 +114,19 @@ class RecentPodcastItem(BaseModel):
 
     id: UUID = Field(..., description="Podcast identifier")
     user_id: UUID = Field(..., description="User identifier")
+    title: Optional[str] = Field(None, description="AI-generated podcast title")
     status: str = Field(..., description="Current status")
     created_at: datetime = Field(..., description="Creation timestamp")
     latency_ms: Optional[int] = Field(None, description="Generation latency (ms)")
     cost_usd: Optional[float] = Field(None, description="Generation cost (USD)")
     error_message: Optional[str] = Field(None, description="Error message if failed")
+    firecrawl_searches: Optional[int] = Field(None, description="Firecrawl searches count")
+    firecrawl_scrapes: Optional[int] = Field(None, description="Firecrawl scrapes count")
+    firecrawl_cost: Optional[float] = Field(None, description="Firecrawl cost (USD)")
+    tokens_used: Optional[int] = Field(None, description="GPT tokens used")
+    elevenlabs_characters: Optional[int] = Field(None, description="ElevenLabs characters")
+    openai_cost: Optional[float] = Field(None, description="OpenAI cost (USD)")
+    elevenlabs_cost: Optional[float] = Field(None, description="ElevenLabs cost (USD)")
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -111,7 +138,11 @@ class RecentPodcastItem(BaseModel):
                 "created_at": "2026-05-04T10:00:00Z",
                 "latency_ms": 45000,
                 "cost_usd": 0.12,
-                "error_message": None
+                "error_message": None,
+                "firecrawl_searches": 5,
+                "firecrawl_scrapes": 10,
+                "tokens_used": 15000,
+                "elevenlabs_characters": 8000
             }
         }
     )
@@ -148,7 +179,15 @@ class AdminStatsResponse(BaseModel):
                     "total_cost_usd": 123.45,
                     "success_rate": 98.5,
                     "total_tokens": 500000,
-                    "total_characters": 250000
+                    "total_characters": 250000,
+                    "total_firecrawl_searches": 1500,
+                    "total_firecrawl_scrapes": 3000,
+                    "total_firecrawl_cost": 15.50,
+                    "cost_breakdown": {
+                        "openai": 15.0,
+                        "elevenlabs": 75.0,
+                        "firecrawl": 15.50
+                    }
                 },
                 "volume_data": [
                     {
@@ -169,7 +208,11 @@ class AdminStatsResponse(BaseModel):
                         "created_at": "2026-05-04T10:00:00Z",
                         "latency_ms": 45000,
                         "cost_usd": 0.12,
-                        "error_message": None
+                        "error_message": None,
+                        "firecrawl_searches": 5,
+                        "firecrawl_scrapes": 10,
+                        "tokens_used": 15000,
+                        "elevenlabs_characters": 8000
                     }
                 ],
                 "generated_at": "2026-05-04T12:00:00Z"
@@ -205,7 +248,11 @@ class RecentPodcastResponse(BaseModel):
                         "created_at": "2026-05-04T10:00:00Z",
                         "latency_ms": 45000,
                         "cost_usd": 0.12,
-                        "error_message": None
+                        "error_message": None,
+                        "firecrawl_searches": 5,
+                        "firecrawl_scrapes": 10,
+                        "tokens_used": 15000,
+                        "elevenlabs_characters": 8000
                     }
                 ],
                 "total": 500,
