@@ -155,6 +155,197 @@ ChatOpenAI(
 
 ---
 
+## Database Design
+
+### Schema Overview
+
+**3-table design** optimized for performance and flexibility:
+
+```
+users (authentication & preferences)
+  ├─ id (UUID, primary key)
+  ├─ username, email, hashed_password
+  ├─ preferences (JSONB) - interests, topics, voice settings
+  ├─ schedule_settings (JSONB) - automated generation config
+  └─ 1:N → podcasts
+
+podcasts (content & status)
+  ├─ id (UUID, primary key)
+  ├─ user_id (FK → users, CASCADE DELETE)
+  ├─ title, script (TEXT), audio_url
+  ├─ status (ENUM: pending|processing|completed|failed)
+  ├─ error_message, podcast_metadata (JSON)
+  └─ 1:1 → metrics
+
+metrics (performance & cost tracking)
+  ├─ id (UUID, primary key)
+  ├─ podcast_id (FK → podcasts, UNIQUE, CASCADE DELETE)
+  ├─ tokens_used, elevenlabs_characters
+  ├─ firecrawl_searches, firecrawl_scrapes
+  ├─ openai_cost, elevenlabs_cost, firecrawl_cost
+  └─ latency_ms, news_fetch_ms, script_generation_ms, audio_generation_ms
+```
+
+---
+
+### Key Design Decisions
+
+#### 1. **PostgreSQL JSONB for Flexibility**
+
+**Decision:** Use JSONB columns for `preferences` and `schedule_settings`
+
+**Why:**
+- **Schema evolution** - Add new preference fields without migrations
+- **Flexibility** - Each user can have different preference structures
+- **Performance** - JSONB supports indexing and efficient queries
+- **Validation** - Pydantic models validate JSON structure in code
+
+**Example:**
+```python
+preferences = {
+    "interests": ["AI", "Technology"],      # Dynamic list
+    "duration_minutes": 10,                 # User-specific
+    "voice_settings": {                     # Nested config
+        "voice_id": "21m00Tcm4TlvDq8ikWAM",
+        "stability": 0.5
+    }
+}
+```
+
+**Trade-off:** Less type safety in DB vs. rapid iteration → Good for early-stage product.
+
+---
+
+#### 2. **UUIDs Instead of Auto-Increment IDs**
+
+**Decision:** Use UUID primary keys for all tables
+
+**Why:**
+- **Distributed-ready** - Can generate IDs client-side
+- **Security** - Harder to enumerate resources (vs. sequential IDs)
+- **Merging** - Easy to merge data from different databases
+- **API-friendly** - IDs are globally unique
+
+**Trade-off:** Slightly larger index size (16 bytes vs 4-8 bytes) vs. better scalability → Worth it.
+
+---
+
+#### 3. **Separate Metrics Table (1:1 Relationship)**
+
+**Decision:** Split metrics into separate table instead of adding columns to podcasts
+
+**Why:**
+- **Separation of concerns** - Podcasts are content, metrics are analytics
+- **Query performance** - Don't load metrics when listing podcasts
+- **Optional data** - Metrics might not exist for failed podcasts
+- **Cleaner schema** - Keeps podcasts table focused
+
+**Implementation:**
+```python
+# Relationship with eager loading
+metrics = relationship(
+    "Metrics",
+    back_populates="podcast",
+    cascade="all, delete-orphan",  # Delete metrics with podcast
+    uselist=False,                 # 1:1 relationship
+    lazy="selectin"                # Load with parent query
+)
+```
+
+---
+
+#### 4. **Composite Indexes for Query Optimization**
+
+**Decision:** Add multi-column indexes for common query patterns
+
+**Indexes created:**
+```sql
+-- User's podcasts by status
+CREATE INDEX ix_podcasts_user_status ON podcasts(user_id, status);
+
+-- User's podcasts chronologically
+CREATE INDEX ix_podcasts_user_created ON podcasts(user_id, created_at);
+
+-- All podcasts by status and time
+CREATE INDEX ix_podcasts_status_created ON podcasts(status, created_at);
+
+-- Cost analysis queries
+CREATE INDEX ix_metrics_cost_estimate ON metrics(cost_estimate);
+```
+
+**Why:**
+- Avoid full table scans for common queries
+- Support admin dashboard efficiently (cost analysis, status filtering)
+- Enable fast pagination
+
+**Trade-off:** Slower writes (update 3 indexes) vs. much faster reads → Worth it for read-heavy workload.
+
+---
+
+#### 5. **CASCADE DELETE for Data Integrity**
+
+**Decision:** Use `ondelete="CASCADE"` for foreign keys
+
+**Why:**
+```python
+user_id = Column(
+    UUID(as_uuid=True),
+    ForeignKey("users.id", ondelete="CASCADE"),  # Delete all podcasts when user deleted
+)
+```
+
+- **Data integrity** - No orphaned podcasts if user is deleted
+- **Simpler code** - Don't need manual cleanup logic
+- **Atomic operations** - Database handles cleanup transactionally
+
+---
+
+#### 6. **Status Enum with Helper Methods**
+
+**Decision:** Use Python Enum + database ENUM type + helper methods
+
+**Implementation:**
+```python
+class PodcastStatus(PyEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+# Helper methods
+def mark_processing(self):
+    self.status = PodcastStatus.PROCESSING
+    self.updated_at = datetime.utcnow()
+```
+
+**Why:**
+- **Type safety** - Can't assign invalid status
+- **Self-documenting** - Clear state transitions
+- **Encapsulation** - Business logic stays with model
+- **Database constraint** - Enum enforced at DB level
+
+---
+
+### What I Learned About Database Design
+
+**1. JSONB is powerful for MVP**
+- Rapid iteration without migrations
+- But loses some type safety - need Pydantic validation
+
+**2. Indexing strategy matters**
+- Added indexes reduced query time from 200ms → 5ms
+- But every index slows down writes - be selective
+
+**3. Relationships need thought**
+- 1:1 (metrics) vs. 1:N (podcasts) have different access patterns
+- `lazy="selectin"` prevents N+1 queries but loads more data
+
+**4. UUIDs are worth it**
+- Initial hesitation about size, but benefits outweigh costs
+- Would use in every future project
+
+---
+
 ## Key Decisions & Trade-offs
 
 ### 1. Async-First Architecture
