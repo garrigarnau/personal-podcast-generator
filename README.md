@@ -9,21 +9,29 @@ This application allows users to input URLs or topics, extract and analyze conte
 ## Tech Stack
 
 ### Backend
-- **FastAPI**: Modern, fast web framework for building APIs
-- **SQLAlchemy**: SQL toolkit and ORM for database management
-- **PostgreSQL**: Robust relational database
-- **Alembic**: Database migration tool
-- **OpenAI**: Content analysis and script generation
-- **ElevenLabs**: High-quality text-to-speech conversion
-- **Firecrawl**: Web content extraction and scraping
+- **FastAPI 0.115.0**: Modern async web framework
+- **SQLAlchemy 2.0.36**: SQL toolkit and async ORM
+- **PostgreSQL 15**: Robust relational database with asyncpg driver
+- **Alembic 1.14.0**: Database migration tool
+- **Pydantic 2.9.2**: Data validation and settings management
+- **OpenAI 1.54.3**: GPT-4o for script generation via LangChain
+- **ElevenLabs 1.10.0**: High-quality multi-speaker TTS
+- **Firecrawl 4.24.0**: Web content extraction and scraping
+- **News API**: Article discovery service
+- **LangChain**: Multi-agent orchestration with LangSmith tracing
+- **pydub 0.25.1**: Audio processing (requires FFmpeg)
+- **python-jose**: JWT authentication
+- **bcrypt**: Password hashing
 
 ### Frontend
-- **React 18**: Modern UI library
-- **TypeScript**: Type-safe JavaScript
-- **Vite**: Fast build tool and dev server
-- **Tailwind CSS**: Utility-first CSS framework
-- **Recharts**: Data visualization for analytics
-- **Lucide React**: Beautiful icon library
+- **React 18.3.1**: Modern UI library
+- **TypeScript 5.6.3**: Type-safe JavaScript
+- **Vite 5.4.11**: Fast build tool and dev server
+- **Tailwind CSS 3.4.15**: Utility-first CSS framework
+- **React Router DOM 6.28.0**: Client-side routing
+- **Axios 1.7.7**: HTTP client with retry logic
+- **Recharts 2.13.3**: Data visualization for analytics
+- **Lucide React 0.462.0**: Beautiful icon library
 
 ## Project Structure
 
@@ -55,10 +63,12 @@ personal-podcast-generator/
 - Python 3.11+
 - Node.js 18+
 - PostgreSQL 15+
+- FFmpeg (for audio processing)
 - API Keys for:
-  - OpenAI
-  - ElevenLabs
-  - Firecrawl
+  - OpenAI (GPT-4o for script generation)
+  - ElevenLabs (text-to-speech)
+  - Firecrawl (web scraping)
+  - News API (article discovery)
 
 ### Backend Setup
 
@@ -81,6 +91,12 @@ pip install -r requirements.txt
 4. Copy `.env.example` to `.env` and fill in your API keys:
 ```bash
 cp .env.example .env
+# Edit the file and add your API keys:
+# - OPENAI_API_KEY
+# - ELEVENLABS_API_KEY
+# - FIRECRAWL_API_KEY
+# - NEWS_API_KEY (REQUIRED)
+# - SECRET_KEY (change in production!)
 ```
 
 5. Run database migrations:
@@ -107,7 +123,13 @@ cd frontend
 npm install
 ```
 
-3. Start the development server:
+3. Copy `.env.example` to `.env` and configure API base URL:
+```bash
+cp .env.example .env
+# Default: VITE_API_BASE_URL=http://localhost:8000
+```
+
+4. Start the development server:
 ```bash
 npm run dev
 ```
@@ -116,18 +138,130 @@ The application will be available at `http://localhost:5173`
 
 ## Features
 
-- **Content Extraction**: Automatically scrape and extract content from URLs
-- **AI-Powered Script Generation**: Transform content into engaging podcast scripts
-- **Multi-Voice Synthesis**: Generate natural-sounding audio with multiple speakers
-- **Analytics Dashboard**: Track podcast generation metrics and insights
-- **User Management**: Secure authentication and user profiles
-- **Responsive UI**: Modern, mobile-friendly interface
+### Core Functionality
+- **Async Podcast Generation**: Background task processing with status polling
+- **News Article Discovery**: Automatic article fetching based on user interests
+- **AI-Powered Script Generation**: Multi-agent LangChain system with GPT-4o
+- **Multi-Speaker Audio**: Natural dialogue between two distinct voices (Alex & Sonia)
+- **Custom Script Support**: Generate audio from user-provided scripts
+- **Comprehensive Metrics**: Track costs, latency, and resource usage per podcast
+
+### User Features
+- **JWT Authentication**: Secure login with 7-day token expiration
+- **User Preferences**: Configure interests, podcast tone, and length
+- **Schedule Settings**: Set up automatic podcast generation
+- **Audio Player**: Full-featured playback with speed control and download
+- **Script Viewer**: View podcast scripts with speaker tags and emotions
+- **Source Attribution**: See articles used for each podcast
+
+### Admin Features
+- **Analytics Dashboard**: KPIs, volume trends, and cost breakdowns
+- **Task Monitoring**: Track generation status, duration, and errors
+- **Resource Tracking**: Monitor OpenAI tokens, ElevenLabs characters, and Firecrawl usage
+- **Health Monitoring**: System status checks and metrics
+
+### Technical Features
+- **Async-First Architecture**: Non-blocking I/O for high performance
+- **Background Task Management**: Queue-based with concurrency limits
+- **Graceful Error Handling**: Retry logic with exponential backoff
+- **Real-Time Status Updates**: Frontend polling every 2 seconds
+- **Docker Support**: Full containerization with health checks
+- **Database Migrations**: Alembic for schema versioning
+- **API Documentation**: Interactive Swagger UI and ReDoc
 
 ## API Documentation
 
-Once the backend is running, visit:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+### Interactive Documentation
+- **Swagger UI**: `http://localhost:8000/docs` - Interactive API testing
+- **ReDoc**: `http://localhost:8000/redoc` - Detailed documentation
+- **Health Check**: `http://localhost:8000/health` - Service status
+
+### Key Endpoints
+
+#### Authentication
+- `POST /api/v1/auth/signup` - Register new user
+- `POST /api/v1/auth/login` - Login (returns JWT)
+- `GET /api/v1/auth/me` - Get current user info
+
+#### Podcast Generation
+- `POST /api/v1/podcasts/generate` - Generate podcast (async, returns 202)
+- `POST /api/v1/podcasts/generate-from-script` - Generate audio from script
+- `GET /api/v1/podcasts/{id}` - Get podcast details
+- `GET /api/v1/podcasts/{id}/status` - Poll podcast status (lightweight)
+- `GET /api/v1/podcasts/{id}/audio` - Stream/download audio file
+- `GET /api/v1/podcasts/` - List user's podcasts (paginated)
+
+#### User Management
+- `GET /api/v1/users/me` - Get current user profile
+- `PUT /api/v1/users/me/preferences` - Update interests and preferences
+- `PUT /api/v1/users/me/schedule` - Configure automatic generation
+
+#### Admin & Analytics
+- `GET /api/v1/admin/stats` - Comprehensive system statistics
+- `GET /api/v1/admin/podcasts/recent` - Recent podcasts with metrics
+- `GET /api/v1/admin/metrics/daily` - Daily aggregated metrics
+
+#### Task Management
+- `GET /api/v1/tasks/{task_id}` - Get task status
+- `GET /api/v1/tasks/` - List all tasks with statistics
+- `POST /api/v1/tasks/{task_id}/cancel` - Cancel running task
+
+See [WORKFLOW.md](WORKFLOW.md) for detailed workflow documentation.
+
+## Environment Variables
+
+### Required Backend Variables
+
+```bash
+# Database
+DATABASE_URL=postgresql+asyncpg://podcast_user:password@localhost:5432/podcast_db
+
+# API Keys (ALL REQUIRED)
+OPENAI_API_KEY=sk-...                    # OpenAI GPT-4o for script generation
+ELEVENLABS_API_KEY=...                   # ElevenLabs for text-to-speech
+FIRECRAWL_API_KEY=...                    # Firecrawl for web scraping
+NEWS_API_KEY=...                         # News API for article discovery
+
+# Security (CHANGE IN PRODUCTION!)
+SECRET_KEY=your-secret-key-change-this   # JWT token signing key
+ALGORITHM=HS256                          # JWT algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES=10080        # 7 days
+```
+
+### Optional Backend Variables
+
+```bash
+# Application Settings
+ENVIRONMENT=development                   # development or production
+DEBUG=True                                # Enable debug mode
+SQL_ECHO=False                            # Log SQL queries
+
+# LangSmith (AI call tracing)
+LANGSMITH_TRACING=true                    # Enable tracing
+LANGSMITH_API_KEY=...                     # LangSmith API key (optional)
+LANGSMITH_PROJECT=personal-podcast        # Project name
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+
+# News API
+NEWS_API_BASE_URL=https://newsapi.org/v2  # News API endpoint
+```
+
+### Frontend Variables
+
+```bash
+# API Configuration
+VITE_API_BASE_URL=http://localhost:8000   # Backend API URL
+```
+
+### Generating Secure Keys
+
+```bash
+# Generate a secure SECRET_KEY
+openssl rand -hex 32
+
+# Or use Python
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 ## Development
 
@@ -138,12 +272,20 @@ Once the backend is running, visit:
 
 ### Testing
 ```bash
-# Backend
+# Backend (when tests are implemented)
+cd backend
 pytest
 
-# Frontend
+# Frontend (when tests are implemented)
+cd frontend
 npm test
+
+# Linting
+cd frontend
+npm run lint
 ```
+
+**Note:** Test suite is currently in development.
 
 ## Deployment
 
@@ -165,10 +307,12 @@ make deploy
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
+- Database: localhost:5432 (internal only in production)
 
 **For comprehensive Docker documentation, see:**
+- **[DOCKER_README.md](DOCKER_README.md)** - Quick reference guide
 - **[DOCKER_SETUP.md](DOCKER_SETUP.md)** - Complete setup guide with troubleshooting
-- **[DOCKER_README.md](DOCKER_README.md)** - Quick reference
+- **[WORKFLOW.md](WORKFLOW.md)** - Detailed workflow from news to audio
 
 ### Development with Docker
 

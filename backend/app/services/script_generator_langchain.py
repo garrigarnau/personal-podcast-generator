@@ -223,12 +223,17 @@ class ScriptGeneratorService:
     """
 
     # Model configuration
-    MODEL = "gpt-4o"
+    PLANNER_MODEL = "gpt-4o-mini"  # Cheaper, sufficient for structured planning
+    WRITER_MODEL = "gpt-4o"        # More capable for creative dialogue
     DEFAULT_TEMPERATURE = 0.8
 
-    # Cost constants (per 1K tokens) - GPT-4o pricing
-    COST_PER_1K_INPUT_TOKENS = 0.0025
-    COST_PER_1K_OUTPUT_TOKENS = 0.01
+    # Cost constants (per 1K tokens)
+    # GPT-4o-mini pricing: $0.15/1M input, $0.60/1M output
+    PLANNER_COST_PER_1K_INPUT = 0.00015
+    PLANNER_COST_PER_1K_OUTPUT = 0.0006
+    # GPT-4o pricing: $2.50/1M input, $10/1M output
+    WRITER_COST_PER_1K_INPUT = 0.0025
+    WRITER_COST_PER_1K_OUTPUT = 0.01
 
     # Length configurations (word counts)
     # Targets based on 150 words per minute speaking rate
@@ -243,20 +248,22 @@ class ScriptGeneratorService:
         self.api_key = api_key or settings.OPENAI_API_KEY
 
         # Planning subagent (lower temperature for structured thinking)
+        # Uses gpt-4o-mini: cheaper and sufficient for structured planning
         self.planner_llm = ChatOpenAI(
-            model=self.MODEL,
+            model=self.PLANNER_MODEL,
             temperature=0.5,
             max_tokens=2000,  # Enough for content plan
             api_key=self.api_key,
-        ).with_config(run_name="Planning Agent")
+        ).with_config(run_name="Planning Agent (gpt-4o-mini)")
 
         # Writing subagent (higher temperature for creativity)
+        # Uses gpt-4o: more capable for creative dialogue generation
         # Note: max_tokens will be set dynamically based on length during invocation
         self.writer_llm = ChatOpenAI(
-            model=self.MODEL,
+            model=self.WRITER_MODEL,
             temperature=self.DEFAULT_TEMPERATURE,
             api_key=self.api_key,
-        ).with_config(run_name="Writing Agent")
+        ).with_config(run_name="Writing Agent (gpt-4o)")
 
         # Setup parsers (with markdown stripping)
         self.plan_parser = RobustPydanticOutputParser(pydantic_object=ContentPlan)
@@ -700,7 +707,8 @@ Generate the complete podcast script now.""")
         # Build metadata
         generation_metadata = {
             "langchain_version": "1.0.0",
-            "model": self.MODEL,
+            "planner_model": self.PLANNER_MODEL,
+            "writer_model": self.WRITER_MODEL,
             "multi_agent": True,
             "generation_timestamp": datetime.utcnow().isoformat(),
             "articles_count": len(articles)
