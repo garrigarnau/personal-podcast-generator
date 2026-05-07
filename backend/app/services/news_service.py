@@ -214,7 +214,7 @@ class FirecrawlNewsService:
         This ensures balanced representation across all user interests rather than biasing toward
         the most popular topics.
 
-        Uses News API /v2/top-headlines endpoint for recent news.
+        Uses News API /v2/everything endpoint with popularity sorting for recent news.
         Returns metadata only (title, description, url, source, date, position).
 
         Args:
@@ -245,30 +245,30 @@ class FirecrawlNewsService:
                 logger.info(f"Searching News API for interest: {interest}")
 
                 try:
-                    # Map interest to News API category if available
-                    category = self.INTEREST_TO_CATEGORY.get(interest.lower())
+                    # Calculate date range (yesterday for both from and to)
+                    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
 
-                    # Build News API request params
+                    # Build News API request params for /v2/everything endpoint
                     params = {
-                        'country': 'us',
                         'q': interest,
                         'pageSize': articles_per_interest,
-                        'apiKey': self.news_api_key
+                        'apiKey': self.news_api_key,
+                        'from': yesterday,
+                        'to': yesterday,
+                        'sortBy': 'popularity'
                     }
-
-                    # Add category if mapped
-                    if category:
-                        params['category'] = category
-                        logger.debug(f"Mapped interest '{interest}' to category '{category}'")
 
                     logger.debug(f"News API request params: {params}")
 
                     # Call News API with retry logic
+                    endpoint = 'https://newsapi.org/v2/everything'
+                    logger.info(f"Calling News API endpoint: {endpoint}")
+
                     result = None
                     for attempt in range(self.max_retries):
                         try:
                             response = await self.http_client.get(
-                                'https://newsapi.org/v2/top-headlines',
+                                endpoint,
                                 params=params
                             )
                             response.raise_for_status()

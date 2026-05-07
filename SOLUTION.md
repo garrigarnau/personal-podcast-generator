@@ -200,17 +200,6 @@ metrics (performance & cost tracking)
 - **Performance** - JSONB supports indexing and efficient queries
 - **Validation** - Pydantic models validate JSON structure in code
 
-**Example:**
-```python
-preferences = {
-    "interests": ["AI", "Technology"],      # Dynamic list
-    "duration_minutes": 10,                 # User-specific
-    "voice_settings": {                     # Nested config
-        "voice_id": "21m00Tcm4TlvDq8ikWAM",
-        "stability": 0.5
-    }
-}
-```
 
 **Trade-off:** Less type safety in DB vs. rapid iteration → Good for early-stage product.
 

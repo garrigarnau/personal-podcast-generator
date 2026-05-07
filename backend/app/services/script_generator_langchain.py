@@ -621,7 +621,7 @@ Generate the complete podcast script now.""")
                 tokens_used=total_tokens,
                 prompt_tokens=0,  # Combined in total_tokens
                 completion_tokens=0,  # Combined in total_tokens
-                model_used=self.MODEL,
+                model_used=f"{self.PLANNER_MODEL}+{self.WRITER_MODEL}",
                 latency_ms=latency_ms,
                 retry_count=0,
                 cost_estimate=round(total_cost, 4)
